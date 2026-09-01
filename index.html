@@ -145,9 +145,11 @@
   .err{color:var(--red);font-size:12px;margin-top:4px;display:none}
   .cols2{display:grid;grid-template-columns:1fr 1fr;gap:13px}
   @media(max-width:520px){.cols2{grid-template-columns:1fr}}
-  .fieldrow{display:grid;grid-template-columns:1fr 1fr 92px auto;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--line);font-size:13px}
+  .fieldrow{display:grid;grid-template-columns:20px minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--line);font-size:13px}
   .fieldrow.head{border-top:0;color:var(--tx3);font-size:11px;text-transform:uppercase}
   .fieldrow .mini{display:flex;gap:3px}
+  .fieldrow.dragover{border-top:2px solid var(--red)}
+  .grip{cursor:grab;color:var(--tx3);user-select:none;text-align:center}
 
   .dropzone{border:2px dashed var(--line2);border-radius:16px;background:var(--panel);padding:44px;text-align:center}
   .dropzone.drag{border-color:var(--red);background:var(--redbg)}
@@ -213,9 +215,7 @@
     .modal-b{max-height:calc(100vh - 118px)}
     .btn{padding:9px 13px}
     .btn.sm{padding:7px 11px;font-size:12px}
-    .fieldrow{grid-template-columns:1fr auto;column-gap:8px;row-gap:2px}
-    .fieldrow>span:nth-child(2){grid-column:1;color:var(--tx3);font-size:11px;text-transform:none}
-    .fieldrow .mini{grid-column:2;grid-row:1/3}
+    .fieldrow{grid-template-columns:16px minmax(0,1fr) auto auto;column-gap:7px;font-size:12px}
     .pdf-stage,.esq-wrap{max-height:58vh}
     .hero{padding:20px}
     .hero h1{font-size:20px}
@@ -391,6 +391,7 @@ function migrar(){
     if(!Array.isArray(p.lugares)) p.lugares = [];
   });
   state.elementos.forEach(e => { if(!Array.isArray(e.hist)) e.hist = []; });
+  if(!Array.isArray(state.bdCols)) state.bdCols = ['codigo', 'tipo', 'pk', 'estado', 'contr', 'lugar', 'mod'];
   /* reglas de campos condicionales por defecto (una sola vez) */
   if(!state.reglasSeed){
     state.elementTypes.forEach(t => {
@@ -685,6 +686,15 @@ function ladoVert(e){
   if(/derech|abajo|infer|\bpar\b/.test(v)) return 1;
   if(/izquierd|arriba|super|impar/.test(v)) return -1;
   return 0;
+}
+/* texto para el tooltip del esquema: código + SOLO el valor de los campos marcados con "Esquema" */
+function hoverEsq(e){
+  const t = getTipo(e.tipoId); if(!t) return '';
+  const parts = [];
+  t.campos.forEach(r => { if(!r.hover) return; const c = getCampo(r.campoId); if(!c) return;
+    const v = e.valores[r.campoId]; if(v != null && String(v).trim() !== '') parts.push(String(v)); });
+  if(!parts.length) return '';
+  return (e.codigo ? e.codigo + '\n' : '') + parts.join('\n');
 }
 /* cruce bajo vía / paso de vía: el elemento pasa de un lado al otro (se dibuja atravesando la vía).
    Se activa si "Tipo de canalización" o "Lado / ubicación" contienen "cruce bajo vía" o "paso de vía". */
@@ -1586,7 +1596,7 @@ function configPatrones(){
 }
 
 /* ================= vista: Esquema interactivo ================= */
-let esqZoom = null, esqAdd = {on:false, tipoId:null}, esqOff = new Set(), esqCtx = {};
+let esqZoom = null, esqAdd = {on:false, tipoId:null}, esqCtx = {};
 let esqModo = null, esqPage = 1, esqPdfScale = null, esqColocar = null, esqPageLock = false;
 let esqCalib = false, esqSubpaths = null, esqSubPage = 0, detSimb = null;
 let esqDibVia = false, esqDibP = null, esqFit = 100, esqWheelPend = null, esqArrastre = null, esqLugar = null;
@@ -1626,7 +1636,7 @@ function materializarVia(num){
   pks.sort((a, b) => a - b);
   const a = pks.length ? pks[0] : mnPKProy(), b = pks.length ? pks[pks.length - 1] : a + 0.3;
   const sp = Math.max((b - a) * 0.15, 0.03);
-  const rec = {id:uid(), num:String(num), padre:'1', tipo:'secundaria', pkIni:a - sp, pkFin:b + sp};
+  const rec = {id:uid(), num:String(num), padre:'1', lugar:'general', tipo:'secundaria', pkIni:a - sp, pkFin:b + sp};
   pr.vias.push(rec); registrarCambio('vía', 'vía ' + num + ' detectada → editable'); save();
   return rec;
 }
@@ -1667,6 +1677,12 @@ function nuevaViaModal(existing, pk1, pk2){
   const inPadOtra = el('input', {value:!padreEsConocida ? padreInicial : '', placeholder:'nº de vía', style:(padreEsConocida ? 'display:none;' : '') + 'margin-top:6px'});
   selPad.addEventListener('change', () => { inPadOtra.style.display = selPad.value === '__otra' ? '' : 'none'; });
 
+  const lugs = pr.lugares || [];
+  const lugSel = esEdit ? (existing.lugar || 'general') : 'general';
+  const selLugar = el('select', null,
+    el('option', {value:'general', ...(lugSel === 'general' ? {selected:'selected'} : {})}, 'GENERAL (sin lugar concreto)'),
+    ...lugs.map(l => el('option', {value:l.id, ...(l.id === lugSel ? {selected:'selected'} : {})}, l.nombre)));
+
   let valA = null, valB = null, valCon = null, valLong = '';
   if(esEdit){
     valA = existing.pkIni; valB = existing.pkFin;
@@ -1702,22 +1718,24 @@ function nuevaViaModal(existing, pk1, pk2){
         el('div', {class:'field'}, el('span', {class:'flab'}, 'Número de vía'), inNum),
         el('div', {class:'field'}, el('span', {class:'flab'}, 'Tipo de vía'), selTipo)),
       el('div', {class:'field'}, el('span', {class:'flab'}, 'Sale de'), selPad, inPadOtra),
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Lugar al que pertenece'), selLugar),
       grpSec, grpTop,
       el('p', {class:'hint', style:'margin-top:0'}, 'Topera: longitud +200 = hacia PK creciente (derecha); −200 = hacia PK decreciente (izquierda).')
     ),
     () => {
       const num = inNum.value.trim(); if(!num){ alert('Pon el número de vía.'); return false; }
       const padre = selPad.value === '__otra' ? (inPadOtra.value.trim() || '1') : (selPad.value || '1');
+      const lugar = selLugar.value || 'general';
       let rec;
       if(selTipo.value === 'topera'){
         const con = pkNum(inCon.value), L = parseFloat(String(inLong.value).replace(',', '.'));
         if(isNaN(con) || !isFinite(L) || L === 0){ alert('Pon el PK de conexión y una longitud (m) distinta de 0.'); return false; }
         const end = con + L / 1000;
-        rec = {num, padre, tipo:'topera', pkIni:Math.min(con, end), pkFin:Math.max(con, end), ladoCon:L >= 0 ? 'ini' : 'fin'};
+        rec = {num, padre, lugar, tipo:'topera', pkIni:Math.min(con, end), pkFin:Math.max(con, end), ladoCon:L >= 0 ? 'ini' : 'fin'};
       } else {
         const a = pkNum(inA.value), b = pkNum(inB.value);
         if(isNaN(a) || isNaN(b)){ alert('Pon PK inicio y fin válidos.'); return false; }
-        rec = {num, padre, tipo:'secundaria', pkIni:Math.min(a, b), pkFin:Math.max(a, b)};
+        rec = {num, padre, lugar, tipo:'secundaria', pkIni:Math.min(a, b), pkFin:Math.max(a, b)};
       }
       if(esEdit){ Object.assign(existing, rec); registrarCambio('vía', 'editada vía ' + num); }
       else { pr.vias.push(Object.assign({id:uid()}, rec)); registrarCambio('vía', 'añadida vía ' + num + ' desde vía ' + padre); }
@@ -1748,7 +1766,9 @@ function configVias(){
       el('span', {class:'flab'}, 'Dibujadas manualmente'),
       (pr.vias || []).length ? el('div', {class:'list'}, ...pr.vias.map(v => el('div', {class:'row pick', onclick:() => { closeModal(); nuevaViaModal(v); }},
         el('span', {class:'grow'}, 'Vía ' + v.num + '  ', el('span', {style:'color:var(--tx3)'},
-          '· ' + (v.tipo === 'topera' ? 'topera' : 'secundaria') + ' desde vía ' + v.padre + ' · ' + toPkStr(v.pkIni) + '–' + toPkStr(v.pkFin))),
+          '· ' + (v.tipo === 'topera' ? 'topera' : 'secundaria') + ' desde vía ' + v.padre +
+          ' · ' + (v.lugar && v.lugar !== 'general' ? ((pr.lugares || []).find(l => l.id === v.lugar) || {}).nombre || 'lugar' : 'GENERAL') +
+          ' · ' + toPkStr(v.pkIni) + '–' + toPkStr(v.pkFin))),
         el('button', {class:'btn icon sm danger', onclick:ev => { ev.stopPropagation(); pr.vias = pr.vias.filter(x => x.id !== v.id); registrarCambio('vía', 'borrada vía ' + v.num); save(); closeModal(); quitarPreguntaViaElementos(v.num); configVias(); }}, '✕')
       ))) : el('div', {class:'empty'}, 'Ninguna vía dibujada.'),
       det.length ? el('div', {style:'margin-top:14px'},
@@ -1894,12 +1914,29 @@ function posPlano(e, cal, page, defY){
   return {x:xi, x2:(xf != null && Math.abs(xf - xi) > 2) ? xf : null, y};
 }
 
+/* botón "＋ Añadir" con menú: Elemento / Vía / Dibujar vía */
+function botonAnadir(){
+  const wrap = el('div', {style:'position:relative;display:inline-block'});
+  wrap.appendChild(el('button', {class:'btn red sm', onclick:ev => { ev.stopPropagation(); addMenu = !addMenu; render(); }}, '＋ Añadir ▾'));
+  if(addMenu){
+    const item = (txt, fn) => el('button', {style:'display:block;width:100%;text-align:left;background:transparent;border:0;color:var(--tx);padding:8px 12px;border-radius:7px;font-size:13px;white-space:nowrap;cursor:pointer',
+      onmouseover:e => e.currentTarget.style.background = 'var(--panel3)', onmouseout:e => e.currentTarget.style.background = '',
+      onclick:ev => { ev.stopPropagation(); addMenu = false; fn(); }}, txt);
+    wrap.appendChild(el('div', {style:'position:absolute;top:34px;left:0;background:var(--panel2);border:1px solid var(--line2);border-radius:10px;padding:5px;z-index:50;box-shadow:0 12px 30px rgba(0,0,0,.45)', onclick:ev => ev.stopPropagation()},
+      item('Elemento nuevo', () => nuevoElemento()),
+      item('Vía nueva', () => nuevaViaModal(null)),
+      item('Dibujar vía en el esquema', () => { esqDibVia = true; esqDibP = null; esqAdd.on = false; render(); })
+    ));
+  }
+  return wrap;
+}
 function viewEsquema(){
   const cont = el('div', null);
-  const els = elementosProy();
+  const elsAll = elementosProy();
+  const els = elsAll.filter(pasaFiltros);
   const pack = pdfCache[state.proyectoActivo];
   const modo = (esqModo === 'pk' || !pack) ? 'pk' : 'pdf';
-  const tiposPresentes = [...new Set(els.map(e => e.tipoId))].map(getTipo).filter(Boolean);
+  const tiposPresentes = [...new Set(elsAll.map(e => e.tipoId))].map(getTipo).filter(Boolean);
   if(!esqAdd.tipoId) esqAdd.tipoId = (state.elementTypes[0] || {}).id;
 
   const datos = els.map(e => ({e, p:elemPK(e), via:viaDe(e)}));
@@ -1920,19 +1957,10 @@ function viewEsquema(){
   }
   cont.appendChild(tb);
 
-  if(tiposPresentes.length){
-    const lg = el('div', {class:'legend'});
-    tiposPresentes.forEach(t => lg.appendChild(el('span', {class:'lg' + (esqOff.has(t.id) ? ' off' : ''), onclick:() => { esqOff.has(t.id) ? esqOff.delete(t.id) : esqOff.add(t.id); render(); }},
-      el('span', {class:'swatch', style:'background:' + t.color}), t.nombre)));
-    cont.appendChild(lg);
-  }
-
   if(modo === 'pk'){
     const vias = proyActivo().vias || [];
     const tb2 = el('div', {class:'pdf-toolbar', style:'margin-top:10px'});
-    tb2.appendChild(el('button', {class:'btn red sm', onclick:() => nuevoElemento()}, '+ Elemento'));
-    tb2.appendChild(el('button', {class:'btn sm', onclick:() => nuevaViaModal(null)}, '+ Vía'));
-    tb2.appendChild(el('button', {class:'btn sm ' + (esqDibVia ? 'red' : ''), onclick:() => { esqDibVia = !esqDibVia; esqDibP = null; esqAdd.on = false; render(); }}, 'Dibujar vía'));
+    tb2.appendChild(botonAnadir());
     const nDet = viasDetectadas().length;
     if(vias.length || nDet) tb2.appendChild(el('button', {class:'btn sm', onclick:() => configVias()}, 'Vías (' + vias.length + (nDet ? ' + ' + nDet : '') + ')'));
     const lugares = proyActivo().lugares || [];
@@ -1940,6 +1968,8 @@ function viewEsquema(){
     if(lugares.length) tb2.appendChild(el('select', {style:'width:auto', onchange:e => { esqLugar = e.target.value || null; esqZoom = null; render(); }},
       el('option', {value:''}, 'Todo el proyecto'),
       ...lugares.map(l => el('option', {value:l.id, ...(l.id === esqLugar ? {selected:'selected'} : {})}, l.nombre))));
+    tb2.appendChild(btnFiltros(elsAll, tiposPresentes));
+    if(hayFiltrosActivos()) tb2.appendChild(el('button', {class:'btn sm', onclick:() => { limpiarFiltros(); render(); }}, '✕ Filtros'));
     tb2.appendChild(el('span', {class:'spacer'}));
     tb2.appendChild(el('span', {style:'font-size:12px;color:var(--tx3)'}, conPk.length + ' con PK · ' + sinPk.length + ' sin PK'));
     tb2.appendChild(el('button', {class:'btn sm', onclick:() => { esqZoom = (esqZoom || esqFit || 100) / 1.25; render(); }}, '−'));
@@ -1953,8 +1983,8 @@ function viewEsquema(){
     if(esqDibVia) cont.appendChild(el('p', {class:'hint', style:'color:var(--amb)'}, esqDibP ? 'Haz clic en el PK final de la vía.' : 'Haz clic en el PK donde arranca la vía (sobre cualquier vía existente).'));
     else if(esqAdd.on) cont.appendChild(el('p', {class:'hint', style:'color:var(--amb)'}, 'Haz clic sobre una vía para crear el elemento en ese PK.'));
     else cont.appendChild(el('p', {class:'hint'}, 'Rueda del ratón = zoom. Botón derecho + arrastrar = desplazar. Arrastrar un elemento (botón izquierdo) = cambiar su PK y su vía.'));
-    if(!conPk.length && !vias.length) cont.appendChild(el('div', {class:'note', style:'margin-top:12px'}, 'No hay elementos con PK. Usa "+ Elemento" o "+ Vía".'));
-    else cont.appendChild(esquemaCanvas(conPk, sinPk));
+    if(!conPk.length && !vias.length) cont.appendChild(el('div', {class:'note', style:'margin-top:12px'}, 'No hay elementos con PK. Usa el botón "＋ Añadir".'));
+    else cont.appendChild(esquemaCanvas(conPk, sinPk, elsAll));
     if(sinPk.length){
       const ch = el('div', {class:'chips'});
       ch.appendChild(el('span', {style:'color:var(--tx3);font-size:12px'}, 'Sin PK (clic para completar):'));
@@ -2067,7 +2097,7 @@ async function renderEsqPdf(pack){
   const defY = base.height * 0.5;
   const puntos = [], lineales = [];
   elementosProy().forEach(e => {
-    if(esqOff.has(e.tipoId)) return;
+    if(!pasaFiltros(e)) return;
     const pos = posPlano(e, cal, esqPage, defY); if(!pos) return;
     (pos.x2 != null ? lineales : puntos).push({e, pos});
   });
@@ -2296,15 +2326,18 @@ function importarSimbolos(){
   render();
 }
 
-function esquemaCanvas(conPk, sinPk){
-  const viasDef = proyActivo().vias || [];
+function esquemaCanvas(conPk, sinPk, elsAll){
   const lugares = proyActivo().lugares || [];
   const lugarSel = esqLugar ? lugares.find(l => l.id === esqLugar) : null;
+  /* con un lugar seleccionado se muestran sus vías + las GENERALES */
+  const viasDef = (proyActivo().vias || []).filter(v => !lugarSel || !v.lugar || v.lugar === 'general' || v.lugar === esqLugar);
+  /* el ancho/extensión del esquema y los carriles NO dependen de los filtros de elementos */
+  const paraExtent = (elsAll && elsAll.length) ? elsAll.map(e => ({p:elemPK(e), via:viaDe(e)})) : conPk.concat(sinPk);
   let mn, mx;
   if(lugarSel){ mn = lugarSel.pkIni; mx = lugarSel.pkFin; }
   else {
     const pks = [];
-    conPk.forEach(d => [d.p.ini, d.p.fin, d.p.pu].forEach(v => { if(!isNaN(v)) pks.push(v); }));
+    paraExtent.forEach(d => [d.p.ini, d.p.fin, d.p.pu].forEach(v => { if(!isNaN(v)) pks.push(v); }));
     viasDef.forEach(v => { pks.push(v.pkIni, v.pkFin); });
     if(!pks.length){ pks.push(0, 1); }
     mn = Math.min(...pks); mx = Math.max(...pks);
@@ -2315,7 +2348,7 @@ function esquemaCanvas(conPk, sinPk){
   const esMain = v => !v || v === '—' || /^1(\D|$)/.test(String(v).trim());
   const esPar = v => /^\d+$/.test(String(v).trim()) && (+v % 2 === 0);
   const laneSet = [];
-  conPk.concat(sinPk).forEach(d => { const v = d.via || ''; if(v && !esMain(v) && laneSet.indexOf(v) < 0) laneSet.push(v); });
+  paraExtent.forEach(d => { const v = d.via || ''; if(v && !esMain(v) && laneSet.indexOf(v) < 0) laneSet.push(v); });
   viasDef.forEach(v => { if(!esMain(v.num) && laneSet.indexOf(String(v.num)) < 0) laneSet.push(String(v.num)); });
   const numSort = (a, b) => String(a).localeCompare(String(b), 'es', {numeric:true});
   const secs = laneSet.slice().sort(numSort);
@@ -2339,9 +2372,10 @@ function esquemaCanvas(conPk, sinPk){
   const lanesY = [{via:'', y:baseY}].concat(secs.map(v => ({via:v, y:yFor(v)})));
   esqCtx = {mn, mx, pxKm, mL, baseY, lanesY};
 
-  const vis = conPk.filter(d => !esqOff.has(d.e.tipoId));
+  const vis = conPk;   /* ya viene filtrado por pasaFiltros desde viewEsquema */
   const esLineal = d => !isNaN(d.p.ini) && !isNaN(d.p.fin);
   const tri = (x, y) => '<path d="M' + (x - 4) + ' ' + (y - 6) + ' L' + (x + 4) + ' ' + (y - 6) + ' L' + x + ' ' + (y + 1) + ' Z" fill="#8794a1"/>';
+  const ttl = e => { const h = hoverEsq(e); return h ? '<title>' + esc(h) + '</title>' : ''; };
 
   let s = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '">';
   /* rejilla de PK: paso adaptativo al zoom (mínimo 25 m) */
@@ -2424,7 +2458,7 @@ function esquemaCanvas(conPk, sinPk){
     x += (k - 1) * 5;
     const t = getTipo(d.e.tipoId) || {}, col = t.color || '#888';
     const y1 = y0 - 18, y2 = y0 + 18;
-    s += '<g data-el="' + d.e.id + '" style="cursor:grab">' +
+    s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
       '<line x1="' + x.toFixed(1) + '" y1="' + y1 + '" x2="' + x.toFixed(1) + '" y2="' + y2 + '" stroke="' + col + '" stroke-width="2.5"/>' +
       '<line x1="' + (x - 3).toFixed(1) + '" y1="' + y1 + '" x2="' + (x + 3).toFixed(1) + '" y2="' + y1 + '" stroke="' + col + '" stroke-width="2.5"/>' +
       '<line x1="' + (x - 3).toFixed(1) + '" y1="' + y2 + '" x2="' + (x + 3).toFixed(1) + '" y2="' + y2 + '" stroke="' + col + '" stroke-width="2.5"/>' +
@@ -2444,7 +2478,7 @@ function esquemaCanvas(conPk, sinPk){
       const t = getTipo(d.e.tipoId) || {}, col = t.color || '#888';
       const y = arriba ? (y0 - 12 - ri * 8) : (y0 + 11 + ri * 8);
       const ty = arriba ? (y - 5) : (y + 12);
-      s += '<g data-el="' + d.e.id + '" style="cursor:grab">' +
+      s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
         '<line x1="' + a.toFixed(1) + '" y1="' + y + '" x2="' + b.toFixed(1) + '" y2="' + y + '" stroke="' + col + '" stroke-width="3" stroke-linecap="round"/>' +
         '<line x1="' + a.toFixed(1) + '" y1="' + (y - 4) + '" x2="' + a.toFixed(1) + '" y2="' + (y + 4) + '" stroke="' + col + '" stroke-width="1.5"/>' +
         '<line x1="' + b.toFixed(1) + '" y1="' + (y - 4) + '" x2="' + b.toFixed(1) + '" y2="' + (y + 4) + '" stroke="' + col + '" stroke-width="1.5"/>' +
@@ -2462,7 +2496,7 @@ function esquemaCanvas(conPk, sinPk){
     const cy = dir > 0 ? (y0 + 13 + stack) : (dir < 0 ? (y0 - 13 + stack) : (y0 - 11 + stack));
     const esAg = /aguja|desv/i.test(t.nombre || '');
     const ty = dir > 0 ? (cy + 15) : (cy - 9);
-    s += '<g data-el="' + d.e.id + '" style="cursor:grab">' +
+    s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
       (esAg ? tri(x, cy + 6) : '<circle cx="' + x.toFixed(1) + '" cy="' + cy + '" r="5" fill="' + col + '" stroke="#0a0f16" stroke-width="1.5"/>') +
       '<text x="' + x.toFixed(1) + '" y="' + ty + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' + esc(d.e.codigo || '') + '</text></g>';
   });
@@ -2486,7 +2520,7 @@ function esquemaCanvas(conPk, sinPk){
   }, {passive:false});
   if(esqWheelPend){
     const wp = esqWheelPend; esqWheelPend = null;
-    setTimeout(() => { box.scrollLeft = (mL + (wp.pkU - mn) * pxKm) - wp.cx; }, 0);
+    setTimeout(() => { box.scrollLeft = (mL + (wp.pkU - mn) * pxKm) - wp.cx; if(wp.top != null) box.scrollTop = wp.top; }, 0);
   }
 
   /* zoom con dos dedos (pellizco) en móvil */
@@ -2580,6 +2614,8 @@ function esquemaCanvas(conPk, sinPk){
       const vr = viaRefDe(t); if(vr) el0.valores[vr] = via;
       el0.modificado = Date.now();
       registrarCambio('edición', (el0.codigo || t.nombre) + ': movido a PK ' + toPkStr(pk) + (via ? ' · vía ' + via : ''), el0.id);
+      /* mantener la posición del esquema tras re-renderizar (no volver al PK 0) */
+      esqWheelPend = {pkU: esqCtx.mn + (box.scrollLeft - esqCtx.mL) / esqCtx.pxKm, cx: 0, top: box.scrollTop};
       save(); render();
     };
     document.addEventListener('mousemove', mv);
@@ -2589,7 +2625,7 @@ function esquemaCanvas(conPk, sinPk){
 }
 
 /* ================= vista: Modelo de datos ================= */
-let selTipoId = null;
+let selTipoId = null, modeloDrag = null;
 function viewModelo(){
   if(!selTipoId && state.elementTypes[0]) selTipoId = state.elementTypes[0].id;
   const p1 = el('div', {class:'card'},
@@ -2626,18 +2662,28 @@ function viewModelo(){
     const filas = tipo.campos.map((ref, i) => {
       const cp = getCampo(ref.campoId);
       const rt = reglaTexto(ref);
-      return el('div', {class:'fieldrow'},
+      const row = el('div', {class:'fieldrow', draggable:'true',
+        ondragstart:ev => { modeloDrag = i; ev.dataTransfer.effectAllowed = 'move'; },
+        ondragend:() => { modeloDrag = null; },
+        ondragover:ev => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; row.classList.add('dragover'); },
+        ondragleave:() => row.classList.remove('dragover'),
+        ondrop:ev => { ev.preventDefault(); row.classList.remove('dragover');
+          if(modeloDrag == null || modeloDrag === i) return;
+          const [m] = tipo.campos.splice(modeloDrag, 1); tipo.campos.splice(i, 0, m); modeloDrag = null; save(); render(); }},
+        el('span', {class:'grip', title:'Arrastra para reordenar'}, '≡'),
         el('span', null, cp ? cp.etiqueta : '(campo borrado)',
-          rt ? el('span', {style:'display:block;font-size:11px;color:var(--amber);margin-top:2px;text-transform:none'}, rt) : null),
-        el('span', {style:'color:var(--tx2)'}, cp ? primNombre(cp.tipo) : '—'),
-        el('label', {style:'display:flex;gap:6px;align-items:center;font-size:12px;color:var(--tx2)'},
-          el('input', {type:'checkbox', ...(ref.obligatorio ? {checked:'checked'} : {}), onchange:e => { ref.obligatorio = e.target.checked; save(); }}), 'Oblig.'),
+          el('span', {style:'display:block;font-size:11px;color:var(--tx3);text-transform:none'}, cp ? primNombre(cp.tipo) : '—'),
+          rt ? el('span', {style:'display:block;font-size:11px;color:var(--amber);text-transform:none'}, rt) : null),
+        el('div', {style:'display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--tx2)'},
+          el('label', {style:'display:flex;gap:5px;align-items:center'},
+            el('input', {type:'checkbox', ...(ref.obligatorio ? {checked:'checked'} : {}), onchange:e => { ref.obligatorio = e.target.checked; save(); }}), 'Oblig.'),
+          el('label', {style:'display:flex;gap:5px;align-items:center', title:'Mostrar este dato al pasar el ratón por el elemento en el Esquema'},
+            el('input', {type:'checkbox', ...(ref.hover ? {checked:'checked'} : {}), onchange:e => { ref.hover = e.target.checked; save(); }}), 'Esquema')),
         el('span', {class:'mini'},
           el('button', {class:'btn icon sm' + (rt ? ' red' : ''), title:'Condición para mostrar este campo', onclick:() => editarRegla(tipo, i)}, '⚙'),
-          el('button', {class:'btn icon sm', onclick:() => moverCampo(tipo, i, -1)}, '↑'),
-          el('button', {class:'btn icon sm', onclick:() => moverCampo(tipo, i, 1)}, '↓'),
           el('button', {class:'btn icon sm danger', onclick:() => { tipo.campos.splice(i, 1); save(); render(); }}, '✕')
         ));
+      return row;
     });
     detalle = el('div', null,
       el('div', {style:'display:flex;align-items:center;gap:10px;margin-bottom:4px;flex-wrap:wrap'},
@@ -2648,9 +2694,9 @@ function viewModelo(){
         el('button', {class:'btn sm', onclick:() => editarTipo(tipo.id)}, 'Editar'),
         el('button', {class:'btn sm danger', onclick:() => borrarTipo(tipo.id)}, 'Borrar')
       ),
-      el('p', {class:'hint', style:'margin-top:0'}, 'Cada elemento de este tipo pedirá rellenar estos campos.'),
+      el('p', {class:'hint', style:'margin-top:0'}, 'Arrastra ≡ para reordenar. "Esquema" = mostrar ese dato al pasar el ratón por el elemento en el Esquema.'),
       el('div', {style:'margin-top:8px'},
-        el('div', {class:'fieldrow head'}, el('span', null, 'Campo'), el('span', null, 'Tipo'), el('span', null, 'Obligatorio'), el('span', null, '')),
+        el('div', {class:'fieldrow head'}, el('span', null, ''), el('span', null, 'Campo'), el('span', null, 'Oblig. / Esquema'), el('span', null, '')),
         ...(filas.length ? filas : [el('div', {class:'empty'}, 'Sin campos todavía.')])
       ),
       el('div', {style:'display:flex;gap:8px;margin-top:14px;flex-wrap:wrap'},
@@ -2669,7 +2715,35 @@ function viewModelo(){
       el('div', {style:'border-top:1px solid var(--line);padding-top:16px'}, detalle)
     )
   );
-  return el('div', {class:'grid3'}, p1, p2, p3);
+  return el('div', null,
+    el('div', {class:'toolbar', style:'margin-bottom:14px'},
+      el('button', {class:'btn', onclick:configColumnasBD}, 'Columnas de la Base de datos…')),
+    el('div', {class:'grid3'}, p1, p2, p3));
+}
+/* qué columnas se ven en la tabla de Base de datos */
+function bdColsDisponibles(){
+  const fijas = [
+    {k:'codigo', lbl:'Código'}, {k:'tipo', lbl:'Tipo'}, {k:'pk', lbl:'PK'},
+    {k:'estado', lbl:'Estado'}, {k:'contr', lbl:'Contratista'}, {k:'via', lbl:'Vía'},
+    {k:'lugar', lbl:'Lugar'}, {k:'mod', lbl:'Modificado'}, {k:'creado', lbl:'Creado'}
+  ];
+  const campos = state.campos.map(c => ({k:'campo:' + c.id, lbl:c.etiqueta}));
+  return fijas.concat(campos);
+}
+function configColumnasBD(){
+  const disp = bdColsDisponibles();
+  const sel = new Set(state.bdCols);
+  const body = el('div', null, el('p', {class:'hint', style:'margin-top:0'}, 'Marca las columnas que quieres ver en la tabla de la Base de datos.'));
+  disp.forEach(col => {
+    body.appendChild(el('label', {style:'display:flex;gap:8px;align-items:center;padding:5px 0;font-size:13px'},
+      el('input', {type:'checkbox', ...(sel.has(col.k) ? {checked:'checked'} : {}), onchange:e => { e.target.checked ? sel.add(col.k) : sel.delete(col.k); }}),
+      col.lbl));
+  });
+  openModal('Columnas de la Base de datos', body, () => {
+    state.bdCols = disp.map(c => c.k).filter(k => sel.has(k));
+    if(!state.bdCols.length) state.bdCols = ['codigo', 'tipo'];
+    save(); render();
+  });
 }
 function moverCampo(tipo, i, dir){
   const j = i + dir; if(j < 0 || j >= tipo.campos.length) return;
@@ -2831,51 +2905,97 @@ function anadirCampoATipo(tipo){
   );
 }
 
-/* ================= vista: Base de datos ================= */
-let filtroTipos = new Set(), filtroEstados = new Set(), filtroLugares = new Set(), filtroAbierto = null, bdSort = {col:'codigo', dir:1};
-document.addEventListener('click', () => { if(filtroAbierto){ filtroAbierto = null; render(); } });
-function chipFiltro(clave, etiqueta, opciones, setSel){
-  const wrap = el('div', {style:'position:relative;display:inline-block'});
-  const n = setSel.size;
-  const btn = el('button', {class:'btn sm' + (n ? ' red' : ''), onclick:ev => {
-    ev.stopPropagation();
-    filtroAbierto = (filtroAbierto === clave) ? null : clave;
-    render();
-  }}, etiqueta + (n ? ' (' + n + ')' : '') + ' ▾');
-  wrap.appendChild(btn);
-  if(filtroAbierto === clave){
-    const panel = el('div', {style:'position:absolute;top:34px;left:0;background:var(--panel2);border:1px solid var(--line2);border-radius:10px;padding:6px;min-width:200px;max-height:260px;overflow:auto;z-index:50;box-shadow:0 12px 30px rgba(0,0,0,.45)', onclick:ev => ev.stopPropagation()},
-      !opciones.length ? el('div', {class:'muted', style:'padding:8px 10px;font-size:12px'}, 'Sin opciones') : null,
-      ...opciones.map(o => {
-        const checked = setSel.has(o.value);
-        return el('label', {style:'display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:7px;cursor:pointer;font-size:13px'},
-          el('input', {type:'checkbox', ...(checked ? {checked:'checked'} : {}), onchange:e => {
-            if(e.target.checked) setSel.add(o.value); else setSel.delete(o.value);
-            render();
-          }}),
-          el('span', null, o.label)
-        );
-      }),
-      setSel.size ? el('button', {class:'btn sm', style:'width:100%;margin-top:6px', onclick:() => { setSel.clear(); render(); }}, 'Limpiar') : null
-    );
-    wrap.appendChild(panel);
+/* ================= filtros unificados (BD + Esquema) =================
+   filtroVis = conjunto de claves OCULTAS. Vacío = todo visible. Marcar una casilla = verlo. */
+let bdSort = {col:'codigo', dir:1};
+let filtroVis = new Set();
+let addMenu = false;
+document.addEventListener('click', () => { if(addMenu){ addMenu = false; render(); } });
+function camposFiltroDeTipo(t){
+  return (t.campos || [])
+    .map(r => getCampo(r.campoId))
+    .filter(c => c && (c.tipo === 'select' || c.tipo === 'number') && /tipo|clase|disposic|foco|tubo|cuadr|hilo|carril|calibre|di[aá]metro/i.test(c.etiqueta))
+    .slice(0, 2);
+}
+function valOr(e, cid){ const v = e.valores && e.valores[cid]; return (v != null && String(v).trim() !== '') ? String(v) : '∅'; }
+function pasaFiltros(e){
+  if(!filtroVis.size) return true;
+  if(filtroVis.has('t:' + e.tipoId)) return false;
+  if(filtroVis.has('e:' + (valorEstado(e) || '∅'))) return false;
+  if(filtroVis.has('l:' + ((lugarDe(e) || {}).id || '∅'))) return false;
+  const t = getTipo(e.tipoId); if(!t) return true;
+  let key = 'v:' + e.tipoId;
+  for(const c of camposFiltroDeTipo(t)){
+    key += '|' + c.id + '=' + valOr(e, c.id);
+    if(filtroVis.has(key)) return false;
   }
-  return wrap;
+  return true;
+}
+function hayFiltrosActivos(){ return filtroVis.size > 0; }
+function limpiarFiltros(){ filtroVis.clear(); }
+function panelFiltros(base, tiposPresentes){
+  const body = el('div', null);
+  const estados = [...new Set(base.map(valorEstado).filter(Boolean))].sort();
+  const lug = (proyActivo().lugares || []).slice().sort((a, b) => a.pkIni - b.pkIni);
+  const refrescar = () => { pinta(); render(); };   /* actualiza el modal Y la vista de debajo al instante */
+  const chk = (key, label, depth, extra) => {
+    const on = !filtroVis.has(key);
+    return el('label', {style:'display:flex;align-items:center;gap:8px;padding:5px 0 5px ' + (2 + depth * 20) + 'px;font-size:13px;cursor:pointer' + (on ? '' : ';opacity:.45')},
+      el('input', {type:'checkbox', style:'width:16px;flex:0 0 auto', ...(on ? {checked:'checked'} : {}), onchange:ev => {
+        if(ev.target.checked){ for(const k of [...filtroVis]) if(k === key || k.indexOf(key + '|') === 0) filtroVis.delete(k); }
+        else filtroVis.add(key);
+        refrescar();
+      }}),
+      extra || null, el('span', null, label));
+  };
+  function pinta(){
+    body.innerHTML = '';
+    body.appendChild(el('div', {style:'display:flex;gap:8px;margin-bottom:8px'},
+      el('button', {class:'btn sm', onclick:() => { filtroVis.clear(); refrescar(); }}, 'Seleccionar todo'),
+      el('button', {class:'btn sm', onclick:() => { filtroVis.clear(); tiposPresentes.forEach(t => filtroVis.add('t:' + t.id)); refrescar(); }}, 'Quitar todo')));
+    body.appendChild(el('div', {class:'flab'}, 'Elementos'));
+    tiposPresentes.forEach(t => {
+      body.appendChild(chk('t:' + t.id, t.nombre, 0, el('span', {class:'swatch', style:'background:' + (t.color || '#888')})));
+      const cf = camposFiltroDeTipo(t); if(!cf.length) return;
+      const els1 = base.filter(e => e.tipoId === t.id);
+      [...new Set(els1.map(e => valOr(e, cf[0].id)))].sort().forEach(v0 => {
+        const k1 = 'v:' + t.id + '|' + cf[0].id + '=' + v0;
+        body.appendChild(chk(k1, v0 === '∅' ? '(sin ' + cf[0].etiqueta.toLowerCase() + ')' : v0, 1));
+        if(cf[1]){
+          const vals1 = [...new Set(els1.filter(e => valOr(e, cf[0].id) === v0).map(e => valOr(e, cf[1].id)))].sort();
+          if(vals1.length > 1 || vals1[0] !== '∅') vals1.forEach(v1 =>
+            body.appendChild(chk(k1 + '|' + cf[1].id + '=' + v1, cf[1].etiqueta + ': ' + (v1 === '∅' ? '—' : v1), 2)));
+        }
+      });
+    });
+    if(estados.length){
+      body.appendChild(el('div', {class:'flab', style:'margin-top:12px'}, 'Estado'));
+      estados.forEach(s => body.appendChild(chk('e:' + s, s, 0)));
+    }
+    if(lug.length){
+      body.appendChild(el('div', {class:'flab', style:'margin-top:12px'}, 'Lugar'));
+      lug.forEach(l => body.appendChild(chk('l:' + l.id, l.nombre, 0)));
+      body.appendChild(chk('l:∅', '(sin lugar)', 0));
+    }
+  }
+  pinta();
+  openModal('Filtros', body, null);
+}
+function btnFiltros(base, tiposPresentes){
+  const n = filtroVis.size;
+  return el('button', {class:'btn sm' + (n ? ' red' : ''), onclick:() => panelFiltros(base, tiposPresentes)},
+    'Filtros' + (n ? ' (' + n + ' oculto' + (n > 1 ? 's' : '') + ')' : ''));
 }
 function viewBD(){
   const cont = el('div', null);
   const base = elementosProy();
-  cont.appendChild(el('div', {class:'sec-title'}, proyActivo().nombre, el('span', {class:'muted'}, base.length + ' elementos')));
-  const chipTipo = chipFiltro('tipo', 'Tipo', state.elementTypes.map(t => ({value:t.id, label:t.nombre})), filtroTipos);
-  const estados = [...new Set(base.map(valorEstado).filter(Boolean))];
-  const chipEstado = chipFiltro('estado', 'Estado', estados.map(s => ({value:s, label:s})), filtroEstados);
   const lugares = proyActivo().lugares || [];
-  const chipLugar = lugares.length ? chipFiltro('lugar', 'Lugar', lugares.slice().sort((a,b)=>a.pkIni-b.pkIni).map(l => ({value:l.id, label:l.nombre})), filtroLugares) : null;
-  const hayFiltros = filtroTipos.size || filtroEstados.size || filtroLugares.size;
+  const tiposPresentes = [...new Set(base.map(e => e.tipoId))].map(getTipo).filter(Boolean);
+  cont.appendChild(el('div', {class:'sec-title'}, proyActivo().nombre, el('span', {class:'muted'}, base.length + ' elementos')));
   cont.appendChild(el('div', {class:'toolbar'},
     el('button', {class:'btn red', onclick:() => nuevoElemento()}, '+ Añadir elemento'),
-    chipTipo, chipEstado, chipLugar,
-    hayFiltros ? el('button', {class:'btn sm', onclick:() => { filtroTipos.clear(); filtroEstados.clear(); filtroLugares.clear(); render(); }}, '✕ Quitar filtros') : null,
+    btnFiltros(base, tiposPresentes),
+    hayFiltrosActivos() ? el('button', {class:'btn sm', onclick:() => { limpiarFiltros(); render(); }}, '✕ Quitar filtros') : null,
     el('span', {class:'spacer'}),
     base.length ? el('button', {class:'btn', onclick:vaciarProyecto}, 'Vaciar proyecto')
                 : el('button', {class:'btn', onclick:cargarEjemplos}, 'Datos de ejemplo'),
@@ -2893,26 +3013,17 @@ function viewBD(){
     el('div', {class:'kpi'}, el('div', {class:'k'}, 'Incidencias'), el('div', {class:'v', style:incN ? 'color:var(--red)' : ''}, String(incN)))
   ));
 
-  let filas = base.slice();
-  if(filtroTipos.size) filas = filas.filter(e => filtroTipos.has(e.tipoId));
-  if(filtroEstados.size) filas = filas.filter(e => filtroEstados.has(valorEstado(e)));
-  if(filtroLugares.size) filas = filas.filter(e => { const l = lugarDe(e); return l && filtroLugares.has(l.id); });
+  let filas = base.filter(pasaFiltros);
   if(!filas.length){
     cont.appendChild(el('div', {class:'note', style:'margin-top:12px;text-align:center;color:var(--tx3)'},
       total ? 'Ningún elemento con esos filtros.' : 'Todavía no hay elementos en este proyecto.'));
     return cont;
   }
 
-  const claves = {
-    codigo: e => (e.codigo || '').toLowerCase(),
-    tipo:   e => ((getTipo(e.tipoId) || {}).nombre || '').toLowerCase(),
-    pk:     e => pkNum(valorPK(e)),
-    estado: e => valorEstado(e).toLowerCase(),
-    contr:  e => valorPorEtiqueta(e, 'Contratista').toLowerCase(),
-    mod:    e => e.modificado || 0,
-    creado: e => e.creado || 0
-  };
-  const kf = claves[bdSort.col] || claves.codigo;
+  let cols = (state.bdCols && state.bdCols.length ? state.bdCols.slice() : ['codigo', 'tipo', 'pk', 'estado']);
+  if(!lugares.length) cols = cols.filter(k => k !== 'lugar');
+  const sd = bdColDef(bdSort.col);
+  const kf = sd.sort || (e => (e.codigo || '').toLowerCase());
   filas.sort((a, b) => {
     let va = kf(a), vb = kf(b);
     const na = (typeof va === 'number' && isNaN(va)), nb = (typeof vb === 'number' && isNaN(vb));
@@ -2928,25 +3039,36 @@ function viewBD(){
 
   const wrap = el('div', {class:'tablewrap'});
   wrap.appendChild(el('table', null,
-    el('thead', null, el('tr', null, thS('Código', 'codigo'), thS('Tipo', 'tipo'), thS('PK', 'pk'),
-      thS('Estado', 'estado'), thS('Contratista', 'contr'), lugares.length ? el('th', null, 'Lugar') : null, thS('Modificado', 'mod'), el('th', null, ''))),
-    el('tbody', null, ...filas.map(e => {
-      const t = getTipo(e.tipoId) || {};
-      const est = valorEstado(e);
-      return el('tr', null,
-        el('td', null, el('code', {class:'pill2'}, e.codigo || '—')),
-        el('td', null, el('span', {class:'swatch', style:'display:inline-block;margin-right:7px;vertical-align:1px;background:' + (t.color || '#888')}), t.nombre || '—'),
-        el('td', null, valorPK(e) || '—'),
-        el('td', null, est ? el('span', {class:'badge ' + estadoBadgeClass(est)}, est) : '—'),
-        el('td', null, valorPorEtiqueta(e, 'Contratista') || '—'),
-        lugares.length ? el('td', {style:'color:var(--tx3);font-size:12px'}, (lugarDe(e) || {}).nombre || '—') : null,
-        el('td', {style:'color:var(--tx3);font-size:12px'}, e.modificado ? new Date(e.modificado).toLocaleDateString() : '—'),
-        el('td', null, el('button', {class:'btn sm', onclick:() => nuevoElemento(e.id)}, 'Abrir'))
-      );
-    }))
+    el('thead', null, el('tr', null, ...cols.map(k => thS(bdColDef(k).lbl, k)), el('th', null, ''))),
+    el('tbody', null, ...filas.map(e => el('tr', null,
+      ...cols.map(k => { const d = bdColDef(k); return d.node ? d.node(e) : el('td', d.muted ? {style:'color:var(--tx3);font-size:12px'} : null, d.get(e)); }),
+      el('td', null, el('button', {class:'btn sm', onclick:() => nuevoElemento(e.id)}, 'Abrir'))
+    )))
   ));
   cont.appendChild(wrap);
   return cont;
+}
+function bdColDef(k){
+  const F = {
+    codigo: {lbl:'Código', node:e => el('td', null, el('code', {class:'pill2'}, e.codigo || '—')), sort:e => (e.codigo || '').toLowerCase()},
+    tipo:   {lbl:'Tipo', node:e => { const t = getTipo(e.tipoId) || {}; return el('td', null,
+              el('span', {class:'swatch', style:'display:inline-block;margin-right:7px;vertical-align:1px;background:' + (t.color || '#888')}), t.nombre || '—'); },
+              sort:e => ((getTipo(e.tipoId) || {}).nombre || '').toLowerCase()},
+    pk:     {lbl:'PK', get:e => valorPK(e) || '—', sort:e => pkNum(valorPK(e))},
+    estado: {lbl:'Estado', node:e => { const est = valorEstado(e); return el('td', null, est ? el('span', {class:'badge ' + estadoBadgeClass(est)}, est) : '—'); },
+              sort:e => valorEstado(e).toLowerCase()},
+    contr:  {lbl:'Contratista', get:e => valorPorEtiqueta(e, 'Contratista') || '—', sort:e => valorPorEtiqueta(e, 'Contratista').toLowerCase()},
+    via:    {lbl:'Vía', get:e => viaDe(e) || '—', sort:e => String(viaDe(e) || '').toLowerCase()},
+    lugar:  {lbl:'Lugar', get:e => (lugarDe(e) || {}).nombre || '—', sort:e => ((lugarDe(e) || {}).nombre || '').toLowerCase(), muted:true},
+    mod:    {lbl:'Modificado', get:e => e.modificado ? new Date(e.modificado).toLocaleDateString() : '—', sort:e => e.modificado || 0, muted:true},
+    creado: {lbl:'Creado', get:e => e.creado ? new Date(e.creado).toLocaleDateString() : '—', sort:e => e.creado || 0, muted:true}
+  };
+  if(F[k]) return F[k];
+  if(k && k.indexOf('campo:') === 0){
+    const id = k.slice(6), c = getCampo(id) || {etiqueta:'?'};
+    return {lbl:c.etiqueta, get:e => (e.valores && e.valores[id]) || '—', sort:e => String((e.valores && e.valores[id]) || '').toLowerCase(), muted:true};
+  }
+  return {lbl:k || '', get:() => '—', sort:() => ''};
 }
 
 /* ================= modal: alta / edición de elemento ================= */
@@ -2972,6 +3094,17 @@ function reducirImagen(file, maxLado, q){
     r.readAsDataURL(file);
   });
 }
+/* visor de foto a pantalla completa (clic o Esc para cerrar) */
+function verFotoGrande(src){
+  let onk;
+  const ov = el('div', {id:'lightbox', style:'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px;cursor:zoom-out'});
+  const cerrar = () => { ov.remove(); document.removeEventListener('keydown', onk); };
+  onk = e => { if(e.key === 'Escape') cerrar(); };
+  ov.addEventListener('click', cerrar);
+  ov.appendChild(el('img', {src, style:'max-width:100%;max-height:100%;border-radius:8px;box-shadow:0 10px 40px rgba(0,0,0,.6)'}));
+  document.addEventListener('keydown', onk);
+  document.body.appendChild(ov);
+}
 /* widget de foto: botón de adjuntar/hacer foto + miniatura + quitar. El dataURL vive en `hidden.value`. */
 function fotoWidget(hidden, ro){
   const wrap = el('div', null);
@@ -2979,7 +3112,7 @@ function fotoWidget(hidden, ro){
   const repaint = () => {
     prev.innerHTML = '';
     if(hidden.value){
-      prev.appendChild(el('img', {src:hidden.value, style:'max-height:110px;max-width:100%;border-radius:8px;border:1px solid var(--line2);display:block'}));
+      prev.appendChild(el('img', {src:hidden.value, title:'Ampliar', style:'max-height:110px;max-width:100%;border-radius:8px;border:1px solid var(--line2);display:block;cursor:zoom-in', onclick:() => verFotoGrande(hidden.value)}));
       if(!ro) prev.appendChild(el('button', {class:'btn sm', type:'button', style:'margin-top:6px', onclick:() => { hidden.value = ''; repaint(); }}, 'Quitar foto'));
     } else if(ro){
       prev.appendChild(el('span', {style:'color:var(--tx3);font-size:12px'}, 'Sin foto'));
@@ -3006,7 +3139,7 @@ function nuevoElemento(id, prefill){
   if(!ex && soloLectura()) return;
   const ro = !!fechaVista;
   const exVal = ex ? (ro ? estadoEnFecha(ex, fechaVista) : {codigo:ex.codigo, valores:ex.valores}) : null;
-  let tipoId = ex ? ex.tipoId : ((prefill && prefill.tipoId) || (filtroTipos.size === 1 ? [...filtroTipos][0] : '') || (state.elementTypes[0] && state.elementTypes[0].id));
+  let tipoId = ex ? ex.tipoId : ((prefill && prefill.tipoId) || (state.elementTypes[0] && state.elementTypes[0].id));
   if(!tipoId){ alert('Primero crea un tipo de elemento en "Modelo de datos".'); return; }
   const body = el('div', null);
   const selTipo = el('select', {...(ex || ro ? {disabled:'disabled'} : {})},
@@ -3307,7 +3440,7 @@ function openModal(titulo, bodyNode, onSave, onDelete){
   document.body.appendChild(modalEl);
 }
 function closeModal(){ if(modalEl){ modalEl.remove(); modalEl = null; } }
-document.addEventListener('keydown', e => { if(e.key === 'Escape') closeModal(); });
+document.addEventListener('keydown', e => { if(e.key === 'Escape'){ if(document.getElementById('lightbox')) return; closeModal(); } });
 
 /* ================= arranque ================= */
 load();
