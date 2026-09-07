@@ -88,8 +88,10 @@ function semilla(){
     {id:'f_estado',  etiqueta:'Estado de montaje',    tipo:'select', opciones:['Pendiente','En ejecución','Instalado','Verificado','Con incidencia']},
     {id:'f_tsenal',  etiqueta:'Tipo de señal',        tipo:'select', opciones:['Avanzada','Entrada','Salida','Maniobra','Retroceso','Indicadora de salida','Indicadora de aguja','Paso a nivel']},
     {id:'f_sdisp',   etiqueta:'Disposición de focos', tipo:'select', opciones:['Alta (una fila)','Baja (focos 2×2)']},
-    {id:'f_sfocos',  etiqueta:'Nº de focos',          tipo:'select', opciones:['2','3','4','5']},
+    {id:'f_sfocos',  etiqueta:'Nº de focos',          tipo:'focos',  opciones:['Amarillo','Rojo','Verde','Blanco']},
     {id:'f_tcanal',  etiqueta:'Tipo de canalización', tipo:'select', opciones:['Canaleta','Canalización de tubo Ø6','Canalización de tubo Ø8','Canalización de tubo Ø12','Zanja hormigonada','Cruce bajo vía']},
+    {id:'f_cruce_long', etiqueta:'Longitud del cruce (m)', tipo:'number'},
+    {id:'f_cruce_vias', etiqueta:'Vías que atraviesa',     tipo:'text'},
     {id:'f_ntubos',  etiqueta:'Nº de tubos',          tipo:'number'},
     {id:'f_tcable',  etiqueta:'Tipo de cable',        tipo:'select', opciones:['Señalización','Energía','Fibra óptica','Cuadrete','Varios cuadretes','Mando','Tierra']},
     {id:'f_ncuad',   etiqueta:'Nº de cuadretes',      tipo:'number'},
@@ -116,10 +118,10 @@ function semilla(){
     {id:'t_cdv',   nombre:'Circuito de vía',  prefijo:'CDV', color:'#33c07d', campos:[c('f_pkini',1),c('f_pkfin',1),c('f_via',0),c('f_estado',1),c('f_obs',0),...CERT]},
     {id:'t_bal',   nombre:'Baliza ASFA',      prefijo:'BAL', color:'#8a6cd6', campos:[c('f_pk',1),c('f_senasoc',0),c('f_distsen',0),c('f_via',0),c('f_estado',1),c('f_obs',0),...CERT]},
     {id:'t_ce',    nombre:'Contador de ejes', prefijo:'CE',  color:'#d8663c', campos:[c('f_pk',1),c('f_estado',1),c('f_obs',0),...CERT]},
-    {id:'t_arm',   nombre:'Armario / CTE',    prefijo:'ARM', color:'#7f8c99', campos:[c('f_pk',1),c('f_lado',0),c('f_estado',1),c('f_obs',0),...CERT]},
+    {id:'t_arm',   nombre:'Armario / CTE',    prefijo:'ARM', color:'#7f8c99', campos:[c('f_pk',1),c('f_lado',0),c('f_cruce_long',0),c('f_cruce_vias',0),c('f_estado',1),c('f_obs',0),...CERT]},
     {id:'t_cable', nombre:'Cableado',         prefijo:'CBL', color:'#4d9de0', campos:[c('f_pkini',1),c('f_pkfin',1),c('f_tcable',1),c('f_ncuad',0),c('f_seccion',0),c('f_long',0),c('f_estado',1),c('f_contr',0),c('f_obs',0),...CERT]},
-    {id:'t_arq',   nombre:'Arqueta',          prefijo:'ARQ', color:'#b07cd6', campos:[c('f_pk',1),c('f_lado',0),c('f_tarq',1),c('f_prof',0),c('f_estado',1),c('f_obs',0),...CERT]},
-    {id:'t_canal', nombre:'Canalización',     prefijo:'CAN', color:'#c9962b', campos:[c('f_pkini',1),c('f_pkfin',1),c('f_tcanal',1),c('f_ntubos',0),c('f_long',0),c('f_lado',0),c('f_estado',1),c('f_contr',0),c('f_obs',0),...CERT]},
+    {id:'t_arq',   nombre:'Arqueta',          prefijo:'ARQ', color:'#b07cd6', campos:[c('f_pk',1),c('f_lado',0),c('f_tarq',1),c('f_prof',0),c('f_cruce_long',0),c('f_cruce_vias',0),c('f_estado',1),c('f_obs',0),...CERT]},
+    {id:'t_canal', nombre:'Canalización',     prefijo:'CAN', color:'#c9962b', campos:[c('f_pkini',1),c('f_pkfin',1),c('f_tcanal',1),c('f_ntubos',0),c('f_long',0),c('f_lado',0),c('f_cruce_long',0),c('f_cruce_vias',0),c('f_estado',1),c('f_contr',0),c('f_obs',0),...CERT]},
     {id:'t_piq',   nombre:'Piquete',          prefijo:'PIQ', color:'#5b8a72', campos:[c('f_pk',1),c('f_via',0),c('f_obs',0),...CERT]},
     {id:'t_hito',  nombre:'Hito PK',          prefijo:'PK',  color:'#7f8c99', campos:[c('f_pk',1),c('f_obs',0),...CERT]},
   ];
@@ -182,11 +184,32 @@ function migrar(){
   /* campos de simbología de señal */
   const senDefs = [
     {id:'f_sdisp', etiqueta:'Disposición de focos', tipo:'select', opciones:['Alta (una fila)', 'Baja (focos 2×2)']},
-    {id:'f_sfocos', etiqueta:'Nº de focos', tipo:'select', opciones:['2', '3', '4', '5']}
+    {id:'f_sfocos', etiqueta:'Nº de focos', tipo:'focos', opciones:['Amarillo', 'Rojo', 'Verde', 'Blanco']}
   ];
   senDefs.forEach(d => { if(!state.campos.some(c => c.id === d.id)) state.campos.push(d); });
   const ts = getTipo('t_senal');
   if(ts) senDefs.forEach(d => { if(!ts.campos.some(r => r.campoId === d.id)) ts.campos.push({campoId:d.id, obligatorio:false}); });
+  /* "Nº de focos": de desplegable 2/3/4/5 → contadores por color (amarillo/rojo/verde/blanco) */
+  const cFoc = state.campos.find(c => c.id === 'f_sfocos');
+  if(cFoc && cFoc.tipo !== 'focos'){ cFoc.tipo = 'focos'; cFoc.opciones = ['Amarillo', 'Rojo', 'Verde', 'Blanco']; }
+  /* cruce bajo vía: longitud + lista de vías que atraviesa (en Canalización, Arqueta y Armario) */
+  if(!state.crucesV2){
+    const cd = [
+      {id:'f_cruce_long', etiqueta:'Longitud del cruce (m)', tipo:'number'},
+      {id:'f_cruce_vias', etiqueta:'Vías que atraviesa', tipo:'text'}
+    ];
+    cd.forEach(d => { if(!state.campos.some(c => c.id === d.id)) state.campos.push(d); });
+    const rCruce = () => ({juntar:'O', conds:[{campoId:'f_tcanal', op:'es', valor:'Cruce bajo vía'}, {campoId:'f_lado', op:'es', valor:'Cruce bajo vía'}]});
+    ['t_canal', 't_arq', 't_arm'].forEach(id => {
+      const tp = getTipo(id); if(!tp) return;
+      cd.forEach(d => {
+        if(tp.campos.some(r => r.campoId === d.id)) return;
+        const iEst = tp.campos.findIndex(r => r.campoId === 'f_estado');
+        tp.campos.splice(iEst < 0 ? tp.campos.length : iEst, 0, {campoId:d.id, obligatorio:false, regla:rCruce()});
+      });
+    });
+    state.crucesV2 = true;
+  }
   /* tipos de señal ampliados (indicadoras de salida / de aguja / PN) para proyectos anteriores */
   const cTsen = state.campos.find(c => c.id === 'f_tsenal');
   if(cTsen){ ['Indicadora de salida','Indicadora de aguja','Paso a nivel'].forEach(o => { if(!(cTsen.opciones || []).includes(o)) (cTsen.opciones = cTsen.opciones || []).push(o); }); }
@@ -216,6 +239,7 @@ function migrar(){
     if(!Array.isArray(p.historial)) p.historial = [];
     if(!Array.isArray(p.vias)) p.vias = [];
     if(!Array.isArray(p.lugares)) p.lugares = [];
+    if(!Array.isArray(p.andenes)) p.andenes = [];
     if(p.modo !== 'diseno' && p.modo !== 'seguimiento') p.modo = 'seguimiento';
     if(!p.diseno || typeof p.diseno !== 'object') p.diseno = {};
     ['vias','agujas','piquetes','estaciones','generados'].forEach(k => { if(!Array.isArray(p.diseno[k])) p.diseno[k] = []; });
@@ -232,6 +256,10 @@ function migrar(){
       set('f_nacopio', {juntar:'Y', conds:[{campoId:'f_cert', op:'es', valor:'Acopiado'}]});
       if(t.id === 't_cable') set('f_ncuad', {juntar:'Y', conds:[{campoId:'f_tcable', op:'unoDe', valor:['Cuadrete', 'Varios cuadretes']}]});
       if(t.id === 't_canal') set('f_ntubos', {juntar:'Y', conds:[{campoId:'f_tcanal', op:'unoDe', valor:['Canalización de tubo Ø6', 'Canalización de tubo Ø8', 'Canalización de tubo Ø12']}]});
+      if(['t_canal', 't_arq', 't_arm'].includes(t.id)){
+        const rCruce = {juntar:'O', conds:[{campoId:'f_tcanal', op:'es', valor:'Cruce bajo vía'}, {campoId:'f_lado', op:'es', valor:'Cruce bajo vía'}]};
+        set('f_cruce_long', clone(rCruce)); set('f_cruce_vias', clone(rCruce));
+      }
     });
     state.reglasSeed = true;
   }
@@ -525,7 +553,9 @@ function hoverEsq(e){
   const t = getTipo(e.tipoId); if(!t) return '';
   const parts = [];
   t.campos.forEach(r => { if(!r.hover) return; const c = getCampo(r.campoId); if(!c) return;
-    const v = e.valores[r.campoId]; if(v != null && String(v).trim() !== '') parts.push(String(v)); });
+    let v = e.valores[r.campoId]; if(v == null || String(v).trim() === '') return;
+    if(c.tipo === 'focos') v = focosResumen(v);
+    if(v) parts.push(String(v)); });
   if(!parts.length) return '';
   return (e.codigo ? e.codigo + '\n' : '') + parts.join('\n');
 }
@@ -537,6 +567,49 @@ function esCruce(e){
     const c = getCampo(r.campoId); if(!c || (c.id !== 'f_tcanal' && c.id !== 'f_lado')) return false;
     return /cruce\s*bajo\s*v[ií]a|paso\s*de\s*v[ií]a/i.test(String(e.valores[r.campoId] || ''));
   });
+}
+/* lista de nº de vía que atraviesa un cruce (campo "Vías que atraviesa": "1,3,5,7") */
+function cruceVias(e){
+  const raw = String((e.valores || {}).f_cruce_vias || '').trim();
+  if(!raw) return [];
+  return [...new Set(raw.split(/[^0-9]+/).filter(Boolean))];
+}
+/* ---- Nº de focos: contadores por color (amarillo/rojo/verde/blanco) ---- */
+const FOCO_COL = {amarillo:'#e8b93c', rojo:'#e23744', verde:'#33c07d', blanco:'#eef3f7'};
+function focoColor(nom){ return FOCO_COL[String(nom || '').toLowerCase().trim()] || '#8794a1'; }
+function parseFocos(v){
+  if(v && typeof v === 'object') return v;
+  try{ const o = JSON.parse(v); if(o && typeof o === 'object') return o; }catch(e){}
+  const n = parseInt(v, 10);
+  return (isFinite(n) && n > 0) ? {_total:n} : {};
+}
+function focosTotal(v){ const o = parseFocos(v); return Object.keys(o).reduce((s, k) => s + (+o[k] || 0), 0); }
+function focosResumen(v){
+  const o = parseFocos(v), t = focosTotal(v);
+  if(!t) return '';
+  const bits = Object.keys(o).filter(k => k !== '_total' && +o[k] > 0).map(k => o[k] + ' ' + k.toLowerCase());
+  return t + (t === 1 ? ' foco' : ' focos') + (bits.length ? ' (' + bits.join(', ') + ')' : '');
+}
+function focosWidget(hidden, ro){
+  const cols = (getCampo('f_sfocos') || {}).opciones || ['Amarillo', 'Rojo', 'Verde', 'Blanco'];
+  const st = parseFocos(hidden.value); delete st._total;
+  const tot = el('div', {style:'font-size:12px;color:var(--tx3);margin-top:2px'});
+  const wrap = el('div', {style:'display:flex;flex-direction:column;gap:6px;margin-bottom:4px'});
+  const sync = () => { hidden.value = JSON.stringify(st); tot.textContent = (focosTotal(st) || 0) + ' focos en total'; hidden.dispatchEvent(new Event('input', {bubbles:true})); };
+  cols.forEach(nom => {
+    if(st[nom] == null) st[nom] = 0;
+    const num = el('span', {style:'min-width:26px;text-align:center;font-variant-numeric:tabular-nums;font-weight:600'}, String(st[nom]));
+    const step = d => { st[nom] = Math.max(0, (+st[nom] || 0) + d); num.textContent = String(st[nom]); sync(); };
+    wrap.appendChild(el('div', {style:'display:flex;align-items:center;gap:8px'},
+      el('span', {style:'width:14px;height:14px;border-radius:3px;border:1px solid var(--line2);flex:0 0 auto;background:' + focoColor(nom)}),
+      el('span', {style:'flex:1;font-size:13px'}, nom),
+      el('button', {type:'button', class:'btn sm', ...(ro ? {disabled:'disabled'} : {}), onclick:() => step(-1)}, '−'),
+      num,
+      el('button', {type:'button', class:'btn sm', ...(ro ? {disabled:'disabled'} : {}), onclick:() => step(1)}, '+')
+    ));
+  });
+  wrap.appendChild(tot); sync();
+  return wrap;
 }
 /* lugar (estación/tramo con nombre) al que pertenece un elemento, por solape de PK */
 function lugarDe(e){
@@ -2902,6 +2975,70 @@ function configLugares(){
       el('p', {class:'hint'}, 'Un lugar es un tramo de PK con nombre (una estación, un tramo…). Se usa para filtrar en Base de datos y para acotar el Esquema.')
     ), null);
 }
+/* ---- Andenes: figura de ancho variable al lateral de una vía (PK inicio→fin con varios puntos {PK, ancho}) ---- */
+function nuevoAndenModal(existing){
+  const pr = proyActivo(); pr.andenes = pr.andenes || [];
+  const inNom = el('input', {value:existing ? (existing.nombre || '') : '', placeholder:'Andén 1'});
+  const conocidas = viasConocidas();
+  const selVia = el('select', null,
+    el('option', {value:''}, 'Vía general (1)'),
+    ...conocidas.filter(n => !/^1$/.test(n)).map(n => el('option', {value:n, ...(existing && String(existing.via) === n ? {selected:'selected'} : {})}, 'Vía ' + n)));
+  const selLado = el('select', null,
+    ...['Lado izquierdo (arriba)', 'Lado derecho (abajo)'].map(o => el('option', {value:o, ...(existing && existing.lado === o ? {selected:'selected'} : {})}, o)));
+  let pts = (existing && Array.isArray(existing.puntos) && existing.puntos.length)
+    ? existing.puntos.map(p => ({pk:toPkStr(p.pk), ancho:String(p.ancho)}))
+    : [{pk:'', ancho:''}, {pk:'', ancho:''}];
+  const ptsWrap = el('div', {style:'display:flex;flex-direction:column;gap:6px'});
+  function pinta(){
+    ptsWrap.innerHTML = '';
+    pts.forEach((p, i) => {
+      const inPk = el('input', {value:p.pk, placeholder:'8+900', oninput:e => p.pk = e.target.value});
+      const inAn = el('input', {type:'number', value:p.ancho, placeholder:'10', style:'width:80px', oninput:e => p.ancho = e.target.value});
+      ptsWrap.appendChild(el('div', {style:'display:flex;gap:8px;align-items:center'},
+        el('span', {style:'color:var(--tx3);font-size:12px;width:16px'}, String(i + 1)),
+        inPk, el('span', {style:'color:var(--tx3);font-size:12px'}, 'ancho'), inAn, el('span', {style:'color:var(--tx3);font-size:12px'}, 'm'),
+        pts.length > 2 ? el('button', {class:'btn sm ghost danger', onclick:() => { pts.splice(i, 1); pinta(); }}, '✕') : ''
+      ));
+    });
+  }
+  pinta();
+  openModal(existing ? 'Editar andén' : 'Nuevo andén',
+    el('div', null,
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Nombre'), inNom),
+      el('div', {class:'cols2'},
+        el('div', {class:'field'}, el('span', {class:'flab'}, 'Vía'), selVia),
+        el('div', {class:'field'}, el('span', {class:'flab'}, 'Lado / ubicación'), selLado)),
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Puntos (PK → ancho)'), ptsWrap),
+      el('div', {style:'margin-top:8px'}, el('button', {class:'btn sm', onclick:() => { pts.push({pk:'', ancho:''}); pinta(); }}, '+ Punto')),
+      el('p', {class:'hint'}, 'Cada punto es un PK con su ancho. Entre puntos el ancho varía en línea recta (p. ej. PK 0 → 10 m, PK 45 → 10 m, PK 100 → 1 m). Mínimo 2 puntos.')
+    ),
+    () => {
+      const nom = inNom.value.trim() || 'Andén';
+      const puntos = pts.map(p => ({pk:pkNum(p.pk), ancho:parseFloat(String(p.ancho).replace(',', '.'))}))
+        .filter(p => isFinite(p.pk) && isFinite(p.ancho) && p.ancho > 0)
+        .sort((a, b) => a.pk - b.pk);
+      if(puntos.length < 2){ alert('Pon al menos 2 puntos válidos (PK y ancho > 0).'); return false; }
+      const rec = {via:selVia.value || '1', lado:selLado.value, puntos};
+      if(existing){ Object.assign(existing, rec, {nombre:nom}); registrarCambio('andén', 'editado andén "' + nom + '"'); }
+      else { pr.andenes.push({id:uid(), nombre:nom, ...rec}); registrarCambio('andén', 'añadido andén "' + nom + '" (vía ' + rec.via + ', ' + puntos.length + ' puntos)'); }
+      save(); render();
+    },
+    existing ? () => { pr.andenes = pr.andenes.filter(x => x.id !== existing.id); registrarCambio('andén', 'borrado andén "' + (existing.nombre || '') + '"'); save(); render(); } : null
+  );
+}
+function configAndenes(){
+  const pr = proyActivo();
+  openModal('Andenes (' + (pr.andenes || []).length + ')',
+    el('div', null,
+      (pr.andenes || []).length ? el('div', {class:'list'}, ...pr.andenes.map(a =>
+        el('div', {class:'row pick', onclick:() => { closeModal(); nuevoAndenModal(a); }},
+          el('span', {class:'grow'}, a.nombre || 'Andén', ' ', el('span', {style:'color:var(--tx3)'},
+            'vía ' + (a.via || '1') + ' · ' + (a.puntos || []).length + ' puntos'))
+        ))) : el('div', {class:'empty'}, 'Ningún andén definido.'),
+      el('div', {style:'margin-top:10px'}, el('button', {class:'btn sm', onclick:() => { closeModal(); nuevoAndenModal(null); }}, '+ Nuevo andén')),
+      el('p', {class:'hint'}, 'Un andén se dibuja como una figura de ancho variable al lateral de su vía. Las canalizaciones, cableado y arquetas cuyos PK caigan sobre él se dibujan sobre su superficie.')
+    ), null);
+}
 const firstPk = e => { const p = elemPK(e); return !isNaN(p.pu) ? p.pu : (!isNaN(p.ini) ? p.ini : NaN); };
 
 /* ---- extracción de trazos vectoriales de una página (para calibrar/detectar símbolos) ---- */
@@ -3008,6 +3145,163 @@ function botonAnadir(){
   }
   return wrap;
 }
+function botonOrden(){ return el('button', {class:'btn sm', onclick:ordenModal}, '🎤 Orden'); }
+
+/* ================= alta por orden hablada / escrita ================= */
+/* Interpreta una frase tipo «añade una señal en el PK 9+531 lado derecho con nombre E'1»
+   y la convierte en {tipoId, codigo, valores}. Sin IA: sólo palabras clave del dominio. */
+function parseOrden(txt){
+  const raw = String(txt || '').trim();
+  if(!raw) return {error:'Escribe o dicta una orden. Ej.: «añade una señal en el PK 9+531 lado derecho con nombre E\'1».'};
+  const t = raw.toLowerCase().replace(/\s+/g, ' ');
+
+  const SIN = /** @type {[RegExp, string][]} */ ([
+    [/circuito(s)? de v[ií]a|\bc\.?d\.?v\.?\b|\bc\.?v\.?\b/, 't_cdv'],
+    [/se[ñn]al(es)?/, 't_senal'],
+    [/aguja|desv[ií]o/, 't_aguja'],
+    [/baliza/, 't_bal'],
+    [/contador( de ejes)?/, 't_ce'],
+    [/armario|\bcte\b/, 't_arm'],
+    [/cableado|\bcable\b/, 't_cable'],
+    [/arqueta/, 't_arq'],
+    [/canalizaci[óo]n|canaleta|zanja|cruce\s+bajo\s+v[ií]a|paso\s+de\s+v[ií]a/, 't_canal'],
+    [/piquete/, 't_piq'],
+    [/\bhito\b/, 't_hito']
+  ]);
+  let tipoId = null;
+  for(const [re, id] of SIN){ if(re.test(t) && getTipo(id)){ tipoId = id; break; } }
+  if(!tipoId) for(const tp of state.elementTypes){ if(tp.nombre && t.includes(tp.nombre.toLowerCase())){ tipoId = tp.id; break; } }
+  if(!tipoId) return {error:'No he reconocido el tipo. Di: señal, aguja, baliza, circuito de vía, canalización, arqueta, armario, cableado, contador, piquete o hito.'};
+  const tipo = getTipo(tipoId);
+  const tieneCampo = id => tipo.campos.some(r => r.campoId === id);
+  const opcs = id => (getCampo(id) || {}).opciones || [];
+
+  const val = {}, notas = [];
+
+  /* PK — rango o único */
+  const normPk = s => { const m = String(s).match(/(\d{1,3})[+.,](\d{1,3})/); return m ? (m[1] + '+' + m[2].padStart(3, '0')) : ''; };
+  const rango = t.match(/(?:de(?:l|sde)?)\s*(?:el\s*)?(?:p\.?k\.?\s*)?(\d{1,3}[+.,]\d{1,3})\s*(?:a(?:l|\s+el)?|hasta(?:\s+el)?)\s*(?:p\.?k\.?\s*)?(\d{1,3}[+.,]\d{1,3})/);
+  let pkIni = '', pkFin = '', pkUno = '';
+  if(rango){ pkIni = normPk(rango[1]); pkFin = normPk(rango[2]); }
+  else { const all = raw.match(/(\d{1,3})\s*[+.,]\s*(\d{1,3})/); if(all) pkUno = normPk(all[0]); }
+  if(tieneCampo('f_pkini') && tieneCampo('f_pkfin')){
+    if(pkIni && pkFin){ val.f_pkini = pkIni; val.f_pkfin = pkFin; }
+    else if(pkUno){ val.f_pkini = pkUno; val.f_pkfin = pkUno; notas.push('sólo un PK: inicio = fin'); }
+  } else if(tieneCampo('f_pk') && (pkUno || pkIni)){
+    val.f_pk = pkUno || pkIni;
+  }
+
+  /* vía */
+  const mv = t.match(/\bv[ií]a\s*(\d{1,2})/);
+  if(mv && tieneCampo('f_via')) val.f_via = mv[1];
+
+  /* lado */
+  let lado = '';
+  if(/lado\s+derech|a la derecha|(?:^|\s)derech/.test(t)) lado = 'Lado derecho (abajo)';
+  else if(/lado\s+izquierd|a la izquierda|(?:^|\s)izquierd/.test(t)) lado = 'Lado izquierdo (arriba)';
+  else if(/\bentrev[ií]as\b/.test(t)) lado = 'Entrevías';
+  else if(/\barriba\b/.test(t)) lado = 'Lado izquierdo (arriba)';
+  else if(/\babajo\b/.test(t)) lado = 'Lado derecho (abajo)';
+  else if(/cruce\s+bajo\s+v[ií]a|paso\s+de\s+v[ií]a/.test(t)) lado = 'Cruce bajo vía';
+  if(lado === 'Cruce bajo vía'){
+    if(tieneCampo('f_tcanal')) val.f_tcanal = 'Cruce bajo vía';
+    else if(tieneCampo('f_lado')) val.f_lado = 'Cruce bajo vía';
+    if(tieneCampo('f_cruce_vias')){
+      const dg = (t.match(/(?:v[ií]as?|atravies[ae]|cruza)\s+((?:\d{1,2}[\s,yael]+)*\d{1,2})/) || [])[1];
+      const ns = dg && dg.match(/\d{1,2}/g);
+      if(ns && ns.length) val.f_cruce_vias = [...new Set(ns)].join(',');
+    }
+  } else if(lado && tieneCampo('f_lado') && opcs('f_lado').includes(lado)) val.f_lado = lado;
+
+  /* estado de montaje */
+  if(tieneCampo('f_estado')) for(const o of opcs('f_estado')){
+    const stem = o.toLowerCase().replace(/[oa]s?$/, '');
+    if(stem.length > 3 && t.includes(stem)){ val.f_estado = o; break; }
+  }
+
+  /* código / nombre — puede ser de varias palabras (BAL E1, CV A3); se corta al llegar a otra instrucción */
+  let codigo = '';
+  const mc = raw.match(/(?:con\s+nombre|nombre|llamad[oa]|que\s+se\s+llame|c[óo]digo|marcad[oa]\s+como)\s+(.+)$/i);
+  if(mc){
+    codigo = mc[1]
+      .split(/\s+(?:del?\b|desde\b|hasta\b|al?\b|en\s+(?:el\s+)?p\.?k\.?|en\s+p\.?k\.?|v[ií]a\b|lado\b|instalad|pendiente|verificad|en\s+ejecuci|con\s+incidenci|entrev[ií]as|arriba\b|abajo\b|a\s+la\s+derecha|a\s+la\s+izquierda)/i)[0]
+      .replace(/\s*\d{1,3}\s*[+.,]\s*\d{1,3}.*$/, '')
+      .trim().replace(/[.,;]+$/, '').replace(/[´`]/g, "'");
+  }
+
+  /* tipo de señal, por el código o por palabra */
+  if(tipoId === 't_senal' && tieneCampo('f_tsenal')){
+    let ts = '';
+    if(/^e['’]/i.test(codigo)) ts = 'Avanzada';
+    else if(/^e\d/i.test(codigo)) ts = 'Entrada';
+    else if(/^i?s\d/i.test(codigo)) ts = 'Salida';
+    else if(/^r\d/i.test(codigo)) ts = 'Retroceso';
+    if(!ts) for(const o of opcs('f_tsenal')){ if(t.includes(o.toLowerCase())){ ts = o; break; } }
+    if(ts) val.f_tsenal = ts;
+  }
+
+  const faltan = tipo.campos.filter(r => r.obligatorio && !val[r.campoId] && !r.regla)
+    .map(r => (getCampo(r.campoId) || {}).etiqueta).filter(Boolean);
+  return {tipoId, tipo, codigo, valores:val, notas, faltan};
+}
+function crearDesdeOrden(r, textoOrden){
+  if(soloLectura()) return null;
+  const nid = uid();
+  state.elementos.push({id:nid, proyectoId:state.proyectoActivo, tipoId:r.tipoId, codigo:r.codigo || '',
+    valores:r.valores, hist:[], plano:null, creado:Date.now(), modificado:Date.now()});
+  registrarCambio('alta (voz)', (r.codigo || r.tipo.nombre) + ' (' + r.tipo.nombre + ') — «' + textoOrden + '»', nid);
+  save(); render();
+  return nid;
+}
+function ordenModal(){
+  if(soloLectura()){ alert('Estás viendo el proyecto a una fecha pasada (solo lectura).'); return; }
+  const inp = el('input', {placeholder:"añade una señal en el PK 9+531 lado derecho con nombre E'1", style:'font-size:14px'});
+  const prev = el('div', {style:'margin-top:12px;font-size:13px;min-height:46px'});
+  const refresca = () => {
+    prev.innerHTML = '';
+    if(!inp.value.trim()) return;
+    const r = parseOrden(inp.value);
+    if(r.error){ prev.appendChild(el('div', {style:'color:var(--amb)'}, r.error)); return; }
+    const campos = Object.keys(r.valores).map(k => (getCampo(k) || {}).etiqueta + ': ' + r.valores[k]);
+    prev.appendChild(el('div', null,
+      el('div', {style:'color:var(--tx)'}, 'Voy a crear: ', el('b', null, r.tipo.nombre),
+        r.codigo ? el('span', null, ' «', el('b', null, r.codigo), '»') : ''),
+      el('div', {style:'color:var(--tx3);margin-top:4px'}, campos.length ? campos.join('  ·  ') : 'sin datos reconocidos'),
+      (r.faltan && r.faltan.length) ? el('div', {style:'color:var(--amb);margin-top:4px'}, 'Faltará por rellenar: ' + r.faltan.join(', ')) : '',
+      (r.notas && r.notas.length) ? el('div', {style:'color:var(--tx3);margin-top:2px'}, r.notas.join('  ·  ')) : ''
+    ));
+  };
+  inp.addEventListener('input', refresca);
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recog = null;
+  const micBtn = SR ? el('button', {class:'btn', type:'button', style:'white-space:nowrap'}, '🎤 Dictar') : null;
+  if(micBtn) micBtn.addEventListener('click', () => {
+    if(recog){ recog.stop(); return; }
+    recog = new SR(); recog.lang = 'es-ES'; recog.interimResults = true; recog.continuous = false;
+    micBtn.textContent = '● Escuchando…';
+    recog.onresult = e => { let s = ''; for(let i = 0; i < e.results.length; i++) s += e.results[i][0].transcript; inp.value = s; refresca(); };
+    recog.onerror = e => { alert('No se pudo usar el micrófono (' + e.error + '). Escribe la orden.'); };
+    recog.onend = () => { micBtn.textContent = '🎤 Dictar'; recog = null; };
+    try{ recog.start(); }catch(e){ recog = null; micBtn.textContent = '🎤 Dictar'; }
+  });
+
+  openModal('Orden por voz o texto',
+    el('div', null,
+      el('div', {style:'display:flex;gap:8px;align-items:center'}, inp, micBtn || ''),
+      el('p', {class:'hint', style:'margin-top:8px'},
+        'Di el tipo (señal, aguja, baliza, circuito de vía, canalización, arqueta, cableado…), el PK ("PK 9+531" o "del 9+300 al 9+600"), el lado, la vía y "con nombre …". Al pulsar Guardar se crea (deshacible con ⟲).'
+        + (SR ? '' : ' El micrófono no está disponible en este navegador — escribe la orden.')),
+      prev
+    ),
+    () => {
+      const r = parseOrden(inp.value);
+      if(r.error){ alert(r.error); return false; }
+      crearDesdeOrden(r, inp.value.trim());
+    }
+  );
+  setTimeout(() => inp.focus(), 30);
+}
 function viewEsquema(){
   const cont = el('div', null);
   const elsAll = elementosProy();
@@ -3039,10 +3333,12 @@ function viewEsquema(){
     const vias = proyActivo().vias || [];
     const tb2 = el('div', {class:'pdf-toolbar', style:'margin-top:10px'});
     tb2.appendChild(botonAnadir());
+    tb2.appendChild(botonOrden());
     const nDet = viasDetectadas().length;
     if(vias.length || nDet) tb2.appendChild(el('button', {class:'btn sm', onclick:() => configVias()}, 'Vías (' + vias.length + (nDet ? ' + ' + nDet : '') + ')'));
     const lugares = proyActivo().lugares || [];
     tb2.appendChild(el('button', {class:'btn sm', onclick:() => configLugares()}, 'Lugares (' + lugares.length + ')'));
+    tb2.appendChild(el('button', {class:'btn sm', onclick:() => configAndenes()}, 'Andenes (' + (proyActivo().andenes || []).length + ')'));
     if(lugares.length) tb2.appendChild(el('select', {style:'width:auto', onchange:e => { esqLugar = e.target.value || null; esqZoom = null; render(); }},
       el('option', {value:''}, 'Todo el proyecto'),
       ...lugares.map(l => el('option', {value:l.id, ...(l.id === esqLugar ? {selected:'selected'} : {})}, l.nombre))));
@@ -3521,59 +3817,147 @@ function esquemaCanvas(conPk, sinPk, elsAll){
   });
   secs.forEach(v => { s += '<text x="8" y="' + (yFor(v) + 4) + '" fill="#9db0c0" font-size="11">Vía ' + esc(v) + '</text>'; });
 
-  /* cruces bajo vía: línea vertical que atraviesa la vía (pasa de un lado al otro).
-     Varios en el mismo PK se separan unos píxeles sin cambiar de PK. */
+  /* --- ANDENES: figura de ancho variable al lateral de una vía. Se dibuja detrás de los elementos --- */
+  const APM = 2.4;   /* px por metro de ancho de andén */
+  const anRegs = [];
+  (proyActivo().andenes || []).forEach(a => {
+    const pts = (a.puntos || []).filter(p => isFinite(p.pk) && isFinite(p.ancho) && p.ancho > 0).slice().sort((x, y) => x.pk - y.pk);
+    if(pts.length < 2) return;
+    const via = esMain(a.via) ? '1' : String(a.via).trim();
+    const dir = /derech|abajo/i.test(a.lado || '') ? 1 : -1;
+    const yInner = yFor(esMain(via) ? '' : via) + dir * 7;
+    const anchoAt = pk => {
+      const q = Math.max(pts[0].pk, Math.min(pts[pts.length - 1].pk, pk));
+      for(let i = 0; i < pts.length - 1; i++){
+        if(q >= pts[i].pk && q <= pts[i + 1].pk){
+          const span = (pts[i + 1].pk - pts[i].pk) || 1;
+          return pts[i].ancho + (q - pts[i].pk) / span * (pts[i + 1].ancho - pts[i].ancho);
+        }
+      }
+      return pts[pts.length - 1].ancho;
+    };
+    anRegs.push({via, dir, pkA:pts[0].pk, pkB:pts[pts.length - 1].pk, yInner, anchoAt});
+    const inn = [], out = [];
+    pts.forEach(p => { const pk = Math.max(mn, Math.min(mx, p.pk)); inn.push(X(pk).toFixed(1) + ',' + yInner.toFixed(1)); });
+    for(let i = pts.length - 1; i >= 0; i--){
+      const pk = Math.max(mn, Math.min(mx, pts[i].pk));
+      out.push(X(pk).toFixed(1) + ',' + (yInner + dir * pts[i].ancho * APM).toFixed(1));
+    }
+    s += '<g><title>' + esc('Andén ' + (a.nombre || '') + ' · vía ' + via + ' · ancho ' + pts.map(p => p.ancho + ' m').join(' → ')) + '</title>' +
+      '<polygon points="' + inn.concat(out).join(' ') + '" fill="rgba(140,160,180,.16)" stroke="rgba(160,180,200,.55)" stroke-width="1"/>' +
+      '<text x="' + (X(Math.max(mn, pts[0].pk)) + 3).toFixed(1) + '" y="' + (yInner + dir * 11).toFixed(1) + '" fill="#93a6b6" font-size="9">' + esc(a.nombre || 'Andén') + '</text></g>';
+  });
+  const andenEn = (via, dir, pk) => anRegs.find(r => r.via === String(via) && (dir === 0 || r.dir === dir) && pk >= r.pkA - 0.01 && pk <= r.pkB + 0.01) || null;
+
+  /* --- CRUCES bajo vía: línea/franja que atraviesa una o varias vías (campo "Vías que atraviesa") --- */
   const cruces = vis.filter(d => esCruce(d.e));
   const cruceIds = new Set(cruces.map(d => d.e.id));
   const cruceOcc = {};
   cruces.forEach(d => {
     const pk = !isNaN(d.p.pu) ? d.p.pu : (!isNaN(d.p.ini) ? d.p.ini : d.p.fin);
     if(isNaN(pk)) return;
-    const y0 = yFor(d.via);
-    let x = X(pk);
-    const key = Math.round(y0) + '_' + Math.round(x);
-    const k = cruceOcc[key] = (cruceOcc[key] || 0) + 1;
-    x += (k - 1) * 5;
     const t = getTipo(d.e.tipoId) || {}, col = t.color || '#888';
-    const y1 = y0 - 18, y2 = y0 + 18;
-    s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
-      '<line x1="' + x.toFixed(1) + '" y1="' + y1 + '" x2="' + x.toFixed(1) + '" y2="' + y2 + '" stroke="' + col + '" stroke-width="2.5"/>' +
-      '<line x1="' + (x - 3).toFixed(1) + '" y1="' + y1 + '" x2="' + (x + 3).toFixed(1) + '" y2="' + y1 + '" stroke="' + col + '" stroke-width="2.5"/>' +
-      '<line x1="' + (x - 3).toFixed(1) + '" y1="' + y2 + '" x2="' + (x + 3).toFixed(1) + '" y2="' + y2 + '" stroke="' + col + '" stroke-width="2.5"/>' +
-      '<text x="' + x.toFixed(1) + '" y="' + (y1 - 4) + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' + esc(d.e.codigo || '') + '</text></g>';
+    let vs = cruceVias(d.e);
+    if(!vs.length) vs = [String(d.via || '1').trim() || '1'];
+    const ys = vs.map(v => yFor(esMain(v) ? '' : String(v)));
+    const yTop = Math.min(...ys) - 16, yBot = Math.max(...ys) + 16;
+    let x = X(pk);
+    const key = Math.round(x);
+    const k = cruceOcc[key] = (cruceOcc[key] || 0) + 1;
+    x += (k - 1) * 6;
+    const lng = parseFloat(String((d.e.valores || {}).f_cruce_long || '').replace(',', '.'));
+    const w = isFinite(lng) && lng > 0 ? Math.max(3, lng / 1000 * pxKm) : 0;
+    const body = w > 0
+      ? '<rect x="' + (x - w / 2).toFixed(1) + '" y="' + yTop + '" width="' + w.toFixed(1) + '" height="' + (yBot - yTop) + '" rx="2" fill="' + col + '22" stroke="' + col + '" stroke-width="1.5"/>'
+      : '<line x1="' + x.toFixed(1) + '" y1="' + yTop + '" x2="' + x.toFixed(1) + '" y2="' + yBot + '" stroke="' + col + '" stroke-width="2.5"/>';
+    const caps = '<line x1="' + (x - 3).toFixed(1) + '" y1="' + yTop + '" x2="' + (x + 3).toFixed(1) + '" y2="' + yTop + '" stroke="' + col + '" stroke-width="2.5"/>' +
+                 '<line x1="' + (x - 3).toFixed(1) + '" y1="' + yBot + '" x2="' + (x + 3).toFixed(1) + '" y2="' + yBot + '" stroke="' + col + '" stroke-width="2.5"/>';
+    const dots = ys.map(y => '<circle cx="' + x.toFixed(1) + '" cy="' + y + '" r="2.6" fill="' + col + '"/>').join('');
+    const lab = esc((d.e.codigo || '') + (vs.length > 1 ? ' (' + vs.join('–') + ')' : '') + (isFinite(lng) && lng > 0 ? ' · ' + lng + ' m' : ''));
+    s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) + body + caps + dots +
+      '<text x="' + x.toFixed(1) + '" y="' + (yTop - 4) + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' + lab + '</text></g>';
   });
-  /* lineales apilados — arriba/abajo de la vía según Lado/ubicación (izq=arriba, der=abajo) */
+
+  /* --- LINEALES: canalización = banda que contiene su cableado; resto apilado arriba/abajo --- */
+  const linAll = vis.filter(d => !cruceIds.has(d.e.id) && esLineal(d));
+  const tId = d => (getTipo(d.e.tipoId) || {}).id;
+  const viaDe0 = d => esMain(d.via) ? '1' : String(d.via).trim();
+  const rango = d => [Math.min(d.p.ini, d.p.fin), Math.max(d.p.ini, d.p.fin)];
+  const cablesLibres = new Set(linAll.filter(d => tId(d) === 't_cable').map(d => d.e.id));
+  const bandas = [];
+  linAll.filter(d => tId(d) === 't_canal').forEach(cd => {
+    const v = viaDe0(cd), dr = (ladoVert(cd.e) < 0 ? -1 : (ladoVert(cd.e) > 0 ? 1 : -1)), rg = rango(cd);
+    const hijos = linAll.filter(xd => {
+      if(tId(xd) !== 't_cable' || !cablesLibres.has(xd.e.id) || viaDe0(xd) !== v) return false;
+      const xd2 = ladoVert(xd.e); if(xd2 !== 0 && (xd2 < 0 ? -1 : 1) !== dr) return false;
+      const xr = rango(xd); return xr[1] > rg[0] && xr[0] < rg[1];
+    });
+    hijos.forEach(xd => cablesLibres.delete(xd.e.id));
+    bandas.push({d:cd, v, dr, hijos});
+  });
   const grpL = {};
-  vis.filter(d => !cruceIds.has(d.e.id) && esLineal(d)).forEach(d => { const v = esMain(d.via) ? '1' : String(d.via).trim(); (grpL[v] = grpL[v] || []).push(d); });
+  const addG = (v, item) => { (grpL[v] = grpL[v] || []).push(item); };
+  bandas.forEach(bd => addG(bd.v, {banda:bd, e:bd.d.e, p:bd.d.p, via:bd.d.via}));
+  linAll.forEach(d => {
+    if(tId(d) === 't_canal') return;
+    if(tId(d) === 't_cable' && !cablesLibres.has(d.e.id)) return;
+    addG(viaDe0(d), d);
+  });
   Object.keys(grpL).forEach(v => {
     const arr = grpL[v].sort((p, q) => Math.min(p.p.ini, p.p.fin) - Math.min(q.p.ini, q.p.fin));
-    const rowsUp = [], rowsDn = [], y0 = yFor(v);
+    const y0 = yFor(v);
+    const rows = {'-1':[], '1':[]};
     arr.forEach(d => {
-      const a = X(Math.min(d.p.ini, d.p.fin)), b = X(Math.max(d.p.ini, d.p.fin));
-      const arriba = ladoVert(d.e) < 0;
-      const rows = arriba ? rowsUp : rowsDn;
-      let ri = rows.findIndex(r => r < a - 4); if(ri < 0){ ri = rows.length; rows.push(0); } rows[ri] = b;
+      const rg = [Math.min(d.p.ini, d.p.fin), Math.max(d.p.ini, d.p.fin)];
+      const a = X(rg[0]), b = X(rg[1]);
+      const bd = d.banda;
+      const dir = bd ? bd.dr : (ladoVert(d.e) < 0 ? -1 : 1);
+      const h = bd ? Math.max(9, bd.hijos.length * 5 + 6) : 6;
+      const st = rows[dir < 0 ? '-1' : '1'];
+      let slot = st.find(sl => sl.end < a - 4);
+      if(!slot){ slot = {end:0, off:st.reduce((m, sl) => Math.max(m, sl.off + sl.h), 0)}; st.push(slot); }
+      slot.end = b; slot.h = Math.max(slot.h || 0, h);
+      const an = andenEn(v, dir, (rg[0] + rg[1]) / 2);
+      const top = an ? (an.yInner + dir * (5 + slot.off)) : (dir < 0 ? (y0 - 13 - slot.off - h) : (y0 + 12 + slot.off));
       const t = getTipo(d.e.tipoId) || {}, col = t.color || '#888';
-      const y = arriba ? (y0 - 12 - ri * 8) : (y0 + 11 + ri * 8);
-      const ty = arriba ? (y - 5) : (y + 12);
-      s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
-        '<line x1="' + a.toFixed(1) + '" y1="' + y + '" x2="' + b.toFixed(1) + '" y2="' + y + '" stroke="' + col + '" stroke-width="3" stroke-linecap="round"/>' +
-        '<line x1="' + a.toFixed(1) + '" y1="' + (y - 4) + '" x2="' + a.toFixed(1) + '" y2="' + (y + 4) + '" stroke="' + col + '" stroke-width="1.5"/>' +
-        '<line x1="' + b.toFixed(1) + '" y1="' + (y - 4) + '" x2="' + b.toFixed(1) + '" y2="' + (y + 4) + '" stroke="' + col + '" stroke-width="1.5"/>' +
-        '<text x="' + ((a + b) / 2).toFixed(1) + '" y="' + ty + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' + esc(d.e.codigo || '') + '</text></g>';
+      if(bd){
+        s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
+          '<rect x="' + a.toFixed(1) + '" y="' + top.toFixed(1) + '" width="' + (b - a).toFixed(1) + '" height="' + h.toFixed(1) + '" rx="3" fill="' + col + '1e" stroke="' + col + '" stroke-width="1.4"/>';
+        bd.hijos.forEach((xd, i) => {
+          const hr = [Math.min(xd.p.ini, xd.p.fin), Math.max(xd.p.ini, xd.p.fin)];
+          const hx1 = Math.max(a, X(hr[0])), hx2 = Math.min(b, X(hr[1]));
+          const cy = top + (i + 1) * (h / (bd.hijos.length + 1));
+          const cc = (getTipo(xd.e.tipoId) || {}).color || '#4d9de0';
+          s += '<line x1="' + hx1.toFixed(1) + '" y1="' + cy.toFixed(1) + '" x2="' + hx2.toFixed(1) + '" y2="' + cy.toFixed(1) + '" stroke="' + cc + '" stroke-width="2" stroke-linecap="round"><title>' + esc((xd.e.codigo || 'cable') + ' · dentro de ' + (d.e.codigo || 'canalización')) + '</title></line>';
+        });
+        s += '<text x="' + ((a + b) / 2).toFixed(1) + '" y="' + (dir < 0 ? (top - 3) : (top + h + 9)).toFixed(1) + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' +
+          esc((d.e.codigo || '') + (bd.hijos.length ? ' · ' + bd.hijos.length + ' cable' + (bd.hijos.length > 1 ? 's' : '') : '')) + '</text></g>';
+      } else {
+        const y = dir < 0 ? (top + h) : top;
+        const ty = dir < 0 ? (y - 5) : (y + 12);
+        s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
+          '<line x1="' + a.toFixed(1) + '" y1="' + y.toFixed(1) + '" x2="' + b.toFixed(1) + '" y2="' + y.toFixed(1) + '" stroke="' + col + '" stroke-width="3" stroke-linecap="round"/>' +
+          '<line x1="' + a.toFixed(1) + '" y1="' + (y - 4).toFixed(1) + '" x2="' + a.toFixed(1) + '" y2="' + (y + 4).toFixed(1) + '" stroke="' + col + '" stroke-width="1.5"/>' +
+          '<line x1="' + b.toFixed(1) + '" y1="' + (y - 4).toFixed(1) + '" x2="' + b.toFixed(1) + '" y2="' + (y + 4).toFixed(1) + '" stroke="' + col + '" stroke-width="1.5"/>' +
+          '<text x="' + ((a + b) / 2).toFixed(1) + '" y="' + ty.toFixed(1) + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' + esc(d.e.codigo || '') + '</text></g>';
+      }
     });
   });
-  /* puntuales — arriba/abajo de la vía según Lado/ubicación */
+
+  /* --- PUNTUALES — arriba/abajo de la vía; sobre el andén si el PK coincide --- */
   const occ = {};
   vis.filter(d => !cruceIds.has(d.e.id) && !esLineal(d)).forEach(d => {
     const t = getTipo(d.e.tipoId) || {}, col = t.color || '#888';
+    const v0 = esMain(d.via) ? '1' : String(d.via).trim();
     const y0 = yFor(d.via), x = X(d.p.pu), dir = ladoVert(d.e);
+    const esAg = /aguja|desv/i.test(t.nombre || '');
+    const an = esAg ? null : andenEn(v0, dir, d.p.pu);
     const key = dir + '_' + Math.round(y0) + '_' + Math.round(x / 15);
     const k = occ[key] = (occ[key] || 0) + 1;
     const stack = (k === 1 ? 0 : (k % 2 ? -1 : 1) * Math.ceil((k - 1) / 2) * 12);
-    const cy = dir > 0 ? (y0 + 13 + stack) : (dir < 0 ? (y0 - 13 + stack) : (y0 - 11 + stack));
-    const esAg = /aguja|desv/i.test(t.nombre || '');
-    const ty = dir > 0 ? (cy + 15) : (cy - 9);
+    const cy = an ? (an.yInner + an.dir * (14 + Math.abs(stack)))
+                  : (dir > 0 ? (y0 + 13 + stack) : (dir < 0 ? (y0 - 13 + stack) : (y0 - 11 + stack)));
+    const ty = ((an ? an.dir : dir) > 0) ? (cy + 15) : (cy - 9);
     s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
       (esAg ? tri(x, cy + 6) : '<circle cx="' + x.toFixed(1) + '" cy="' + cy + '" r="5" fill="' + col + '" stroke="#0a0f16" stroke-width="1.5"/>') +
       '<text x="' + x.toFixed(1) + '" y="' + ty + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' + esc(d.e.codigo || '') + '</text></g>';
@@ -4072,6 +4456,7 @@ function viewBD(){
   cont.appendChild(el('div', {class:'sec-title'}, proyActivo().nombre, el('span', {class:'muted'}, base.length + ' elementos')));
   cont.appendChild(el('div', {class:'toolbar'},
     el('button', {class:'btn red', onclick:() => nuevoElemento()}, '+ Añadir elemento'),
+    el('button', {class:'btn', onclick:ordenModal}, '🎤 Orden por voz'),
     btnFiltros(base, tiposPresentes),
     hayFiltrosActivos() ? el('button', {class:'btn sm', onclick:() => { limpiarFiltros(); render(); }}, '✕ Quitar filtros') : null,
     el('span', {class:'spacer'}),
@@ -4144,7 +4529,8 @@ function bdColDef(k){
   if(F[k]) return F[k];
   if(k && k.indexOf('campo:') === 0){
     const id = k.slice(6), c = getCampo(id) || {etiqueta:'?'};
-    return {lbl:c.etiqueta, get:e => (e.valores && e.valores[id]) || '—', sort:e => String((e.valores && e.valores[id]) || '').toLowerCase(), muted:true};
+    const fmt = c.tipo === 'focos' ? (v => focosResumen(v) || '—') : (v => v || '—');
+    return {lbl:c.etiqueta, get:e => fmt(e.valores && e.valores[id]), sort:e => String((e.valores && e.valores[id]) || '').toLowerCase(), muted:true};
   }
   return {lbl:k || '', get:() => '—', sort:() => ''};
 }
@@ -4241,6 +4627,7 @@ function nuevoElemento(id, prefill){
       else if(c.tipo === 'date') input = el('input', {type:'date', value:val});
       else if(c.tipo === 'pk') input = el('input', {placeholder:'45+320', value:val});
       else if(c.tipo === 'photo'){ input = el('input', {type:'hidden', value:val}); extra = fotoWidget(input, ro); }
+      else if(c.tipo === 'focos'){ input = el('input', {type:'hidden', value:val}); extra = focosWidget(input, ro); }
       else if(c.tipo === 'doc') input = el('input', {placeholder:'Nombre de archivo', value:val});
       else if(/observ|caracter/i.test(c.etiqueta)) input = el('textarea', {rows:2}, val);
       else input = el('input', {value:val});
@@ -4308,6 +4695,7 @@ function nuevoElemento(id, prefill){
           const a = ex.valores[r.campoId] || '', b = valores[r.campoId] || '';
           if(a === b) return;
           if(c.tipo === 'photo' || c.tipo === 'doc') difs.push(c.etiqueta + (b ? ' actualizada' : ' quitada'));
+          else if(c.tipo === 'focos') difs.push(c.etiqueta + ': ' + (focosResumen(b) || '0 focos'));
           else difs.push(c.etiqueta + ' "' + a + '"→"' + b + '"');
         });
         if(difs.length){
