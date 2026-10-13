@@ -822,7 +822,10 @@ function render(){
   renderBrand(); renderNav(); renderTopRight(); renderSub();
   const root = document.getElementById('view');
   const _eb = document.getElementById('dzesqbox');
-  if(_eb) dzEsqScroll = {l:_eb.scrollLeft, t:_eb.scrollTop};
+  if(_eb) dzEsqGuardar(_eb);
+  /* al vaciar #view la página encoge y el navegador sube el scroll de la ventana:
+     si se re-renderiza la MISMA vista, se devuelve la ventana a donde estaba */
+  const _wy = window.scrollY, _misma = _vistaPrevia === currentView + '|' + modoActual();
   root.innerHTML = '';
   const dsg = modoActual() === 'diseno';
   const map = {resumen:viewResumen, plano:viewPlano, esquema:viewEsquema, bd:viewBD, certif:viewCertificaciones, historial:viewHistorial, modelo:viewModelo, entrada:viewDatosEntrada, generar:viewGenerar};
@@ -830,6 +833,33 @@ function render(){
   if(dsg && !['entrada','generar','esquema','plano','bd','cableado','esqcable'].includes(currentView)) currentView = 'entrada';
   if(!dsg && ['entrada','generar','cableado','esqcable'].includes(currentView)) currentView = 'resumen';
   root.appendChild((map[currentView] || viewResumen)());
+  _vistaPrevia = currentView + '|' + modoActual();
+  if(_misma && window.scrollY !== _wy) window.scrollTo(window.scrollX, _wy);
+}
+let _vistaPrevia = '';
+/* cabecera del Esquema por PK: barra de desplazamiento horizontal + regla de PK, ENCIMA del esquema.
+   La barra propia del contenedor se oculta por CSS (.esq-pk) y las tres piezas se mueven juntas;
+   la regla queda siempre a la vista aunque se desplace el esquema en vertical. */
+function esqCabecera(box, W, reglaSvg, oscura){
+  const esp = el('div', {style:'height:1px;width:' + W + 'px'});
+  const barra = el('div', {class:'esq-barra'}, esp);
+  const regla = el('div', {class:'esq-regla', html:reglaSvg});
+  const cab = el('div', {class:'esq-cab' + (oscura ? ' osc' : '')}, barra, regla);
+  const igualar = (dst, x) => { if(Math.abs(dst.scrollLeft - x) > 0.5) dst.scrollLeft = x; };
+  barra.addEventListener('scroll', () => igualar(box, barra.scrollLeft));
+  box.addEventListener('scroll', () => { igualar(barra, box.scrollLeft); igualar(regla, box.scrollLeft); });
+  /* mismo ancho visible y mismo recorrido que el esquema (su barra vertical le quita ancho) */
+  const ajustar = () => {
+    if(!box.isConnected) return;
+    const w = box.clientWidth, l = box.clientLeft || 0;
+    barra.style.width = regla.style.width = w + 'px';
+    barra.style.marginLeft = regla.style.marginLeft = l + 'px';
+    esp.style.width = Math.max(w, box.scrollWidth) + 'px';
+    igualar(barra, box.scrollLeft); igualar(regla, box.scrollLeft);
+  };
+  requestAnimationFrame(ajustar);
+  if(typeof ResizeObserver !== 'undefined') new ResizeObserver(ajustar).observe(box);
+  return cab;
 }
 function renderBrand(){
   const b = document.getElementById('brand'); if(!b) return;
@@ -3369,8 +3399,25 @@ function viewBDDiseno(){
   wrap.appendChild(tb); c.appendChild(wrap);
   return c;
 }
-let dzEsqZoom = null, dzEsqPend = null, dzEsqPan = null, dzEsqFiltro = new Set(), dzEsqEdit = false, dzEsqDrag = null, dzEsqGeo = null, dzEsqScroll = {l:0, t:0}, dzEsqEst = '';
+let dzEsqZoom = null, dzEsqPend = null, dzEsqPan = null, dzEsqFiltro = new Set(), dzEsqEdit = false, dzEsqDrag = null, dzEsqGeo = null, dzEsqScroll = {pk:null, t:0}, dzEsqEst = '';
+/* posición del esquema de diseño: el PK del borde izquierdo (no píxeles), así sobrevive a zoom,
+   filtros y cambios de extensión. Solo se lee del contenedor cuando ya se le ha devuelto su
+   posición: un render que llega antes (doble render, rueda rápida) leería 0 y saltaría al principio. */
+function dzEsqGuardar(box){
+  const geo = dzEsqGeo;
+  if(!box || !geo || !box.isConnected || box.dataset.ok !== '1') return;
+  dzEsqScroll = {pk:geo.mn + (box.scrollLeft - geo.pad) / geo.pxKm, t:box.scrollTop};
+}
 function dzVis(k){ return !dzEsqFiltro.has(k); }
+/* zoom desde los botones manteniendo el PK del centro de lo que se está mirando */
+function dzZoomBtn(z){
+  const box = document.getElementById('dzesqbox'), geo = dzEsqGeo;
+  if(box && geo && box.dataset.ok === '1'){
+    const offX = box.clientWidth / 2;
+    dzEsqPend = {pkCursor:geo.mn + (box.scrollLeft + offX - geo.pad) / geo.pxKm, offX};
+  }
+  dzEsqZoom = z; render();
+}
 function viewEsquemaDiseno(){
   const d = disenoDe();
   const c = el('div', null);
@@ -3416,11 +3463,11 @@ function viewEsquemaDiseno(){
   c.appendChild(el('div', {class:'toolbar', style:'margin-bottom:10px'},
     el('button', {class:'btn sm' + (dzEsqEdit ? ' red' : ''), onclick:() => { dzEsqEdit = !dzEsqEdit; dzEsqDrag = null; render(); }},
       dzEsqEdit ? '🔒 Bloquear' : '🔓 Desbloquear'),
-    el('button', {class:'btn sm', onclick:() => { dzEsqZoom = Math.max(PXMIN, pxKm / 1.3); render(); }}, '−'),
-    el('button', {class:'btn sm', onclick:() => { dzEsqZoom = Math.min(PXMAX, pxKm * 1.3); render(); }}, '+'),
+    el('button', {class:'btn sm', onclick:() => dzZoomBtn(Math.max(PXMIN, pxKm / 1.3))}, '−'),
+    el('button', {class:'btn sm', onclick:() => dzZoomBtn(Math.min(PXMAX, pxKm * 1.3))}, '+'),
     el('button', {class:'btn sm', onclick:() => { dzEsqZoom = null; render(); }}, 'Ajustar'),
     estNombres.length ? el('select', {class:'btn sm', style:'padding:2px 6px',
-      onchange:e => { dzEsqEst = e.target.value; dzEsqZoom = null; dzEsqScroll = {l:0, t:0}; render(); }},
+      onchange:e => { dzEsqEst = e.target.value; dzEsqZoom = null; dzEsqScroll = {pk:null, t:0}; render(); }},
       el('option', {value:'', ...(dzEsqEst ? {} : {selected:'selected'})}, '— Toda la línea'),
       ...estNombres.map(o => el('option', {value:o, ...(dzEsqEst === o ? {selected:'selected'} : {})}, 'Estación: ' + o))) : null,
     el('span', {class:'muted', style:'font-size:11px'}, dzEsqEdit
@@ -3475,7 +3522,7 @@ function viewEsquemaDiseno(){
   abajo.forEach((nu, i) => rowY[nu] = midY + (i + 1) * rowH);
   const yVia = k => rowY[String(k)] != null ? rowY[String(k)] : midY;
   const nRows = arriba.length + abajo.length + 1;
-  const axY = midY + (abajo.length + 1) * rowH + 6, H = axY + 40;
+  const axY = midY + (abajo.length + 1) * rowH + 6, H = axY + 8;   /* la regla de PK va en la cabecera, arriba */
   const topGrid = midY - arriba.length * rowH - 30;
   const tri = (x, y, up, col) => '<path d="M' + x + ' ' + (y + (up ? 7 : -7)) + ' L' + (x + 7) + ' ' + (y + (up ? -6 : 6)) + ' L' + (x - 7) + ' ' + (y + (up ? -6 : 6)) + ' Z" fill="' + col + '"/>';
   const G = (title, inner) => '<g><title>' + esc(title) + '</title>' + inner + '</g>';
@@ -3578,21 +3625,24 @@ function viewEsquemaDiseno(){
       '<circle cx="' + x + '" cy="' + (y + (bel ? 8 : -6)) + '" r="' + (dzEsqEdit ? 5 : 3.5) + '" fill="' + (g.existente ? 'none' : col) + '" stroke="' + (g.existente ? col : (dzEsqEdit ? '#fff' : 'none')) + '" stroke-width="' + (g.existente ? 1.6 : (dzEsqEdit ? 1 : 0)) + '"/>' +
       '<text x="' + x + '" y="' + (y + (bel ? 20 : -13)) + '" fill="' + col + '" font-size="9" text-anchor="middle">' + esc(g.codigo) + '</text>');
   });
-  /* eje PK */
-  s += '<line x1="' + pad + '" y1="' + axY + '" x2="' + (pad + plotW) + '" y2="' + axY + '" stroke="#33434f"/>';
+  s += '</svg>';
+  /* regla de PK (va en la cabecera, encima del esquema) */
+  let regla = '<svg width="' + W + '" height="26" font-family="inherit">' +
+    '<line x1="' + pad + '" y1="25" x2="' + (pad + plotW) + '" y2="25" stroke="#33434f"/>';
   for(let pk = Math.ceil(mn / stepKm) * stepKm; pk <= mx + 1e-9; pk += stepKm){
     const x = X(pk);
-    s += '<line x1="' + x + '" y1="' + axY + '" x2="' + x + '" y2="' + (axY + 5) + '" stroke="#33434f"/>';
-    s += '<text x="' + x + '" y="' + (axY + 18) + '" fill="#6a7d8c" font-size="10" text-anchor="middle">' + toPkStr(pk) + '</text>';
+    regla += '<line x1="' + x + '" y1="20" x2="' + x + '" y2="25" stroke="#33434f"/>' +
+      '<text x="' + x + '" y="15" fill="#6a7d8c" font-size="10" text-anchor="middle">' + toPkStr(pk) + '</text>';
   }
-  s += '</svg>';
+  regla += '</svg>';
   dzEsqGeo = {mn:mn, pxKm:pxKm, pad:pad, rowY:rowY, midY:midY,
     estRangos:(d.estaciones || []).map(e => ({nom:String(e.nombre || '').trim(), a:num(e.pkIni), b:num(e.pkFin)})).filter(e => isFinite(e.a) && isFinite(e.b))};
-  const box = el('div', {class:'tablewrap', id:'dzesqbox', style:'overflow:auto;position:relative;min-height:480px;max-height:80vh;resize:vertical' + (dzEsqEdit ? ';outline:2px solid var(--red);outline-offset:-2px' : '')});
+  const box = el('div', {class:'tablewrap esq-pk', id:'dzesqbox', style:'overflow:auto;position:relative;min-height:480px;max-height:80vh;resize:vertical' + (dzEsqEdit ? ';outline:2px solid var(--red);outline-offset:-2px' : '')});
   box.appendChild(el('div', {html:s}));
-  box.addEventListener('scroll', () => { dzEsqScroll = {l:box.scrollLeft, t:box.scrollTop}; });
+  box.addEventListener('scroll', () => dzEsqGuardar(box));
   box.addEventListener('wheel', ev => {
     ev.preventDefault();
+    if(box.dataset.ok !== '1') return;   /* aún sin colocar: su scroll sería 0 */
     const rect = box.getBoundingClientRect(), offX = ev.clientX - rect.left;
     const pkCursor = mn + (box.scrollLeft + offX - pad) / pxKm;
     dzEsqZoom = Math.max(PXMIN, Math.min(PXMAX, pxKm * (ev.deltaY < 0 ? 1.25 : 1 / 1.25)));
@@ -3653,17 +3703,21 @@ function viewEsquemaDiseno(){
       if(dzEsqPan){ dzEsqPan = null; const b = document.getElementById('dzesqbox'); if(b) b.style.cursor = ''; }
     });
   }
+  c.appendChild(esqCabecera(box, W, regla, false));
   c.appendChild(box);
   /* mantener la posición del esquema entre re-renders (zoom, arrastre, filtro, edición…).
-     el scroll actual se captura en render() justo antes de vaciar #view */
+     se guarda como PK del borde izquierdo en render() (dzEsqGuardar) justo antes de vaciar #view.
+     el destino se apunta YA en dzEsqScroll: si llega otro render antes de aplicarlo, no se pierde */
   const pend = dzEsqPend; dzEsqPend = null;
+  if(pend) dzEsqScroll = {pk:pend.pkCursor - pend.offX / pxKm, t:dzEsqScroll.t};
   const tgt = {
-    l: pend ? Math.max(0, (pend.pkCursor - mn) * pxKm + pad - pend.offX) : dzEsqScroll.l,
+    l: dzEsqScroll.pk == null ? 0 : Math.max(0, (dzEsqScroll.pk - mn) * pxKm + pad),
     t: dzEsqScroll.t
   };
   const restore = () => {
-    const b = document.getElementById('dzesqbox'); if(!b) return;
-    b.scrollLeft = tgt.l; b.scrollTop = tgt.t;
+    if(!box.isConnected) return;
+    box.scrollLeft = tgt.l; box.scrollTop = tgt.t;
+    box.dataset.ok = '1';
   };
   restore();
   requestAnimationFrame(restore);
@@ -4650,8 +4704,8 @@ let esqAncla = null;
 function esqSoltarAncla(){ esqAncla = null; esqWheelPend = null; }
 /* zoom desde los botones manteniendo el centro de lo que se está mirando */
 function esqZoomBtn(f){
-  const box = document.querySelector('.esq-wrap');
-  if(box && esqCtx.pxKm){
+  const box = /** @type {HTMLElement | null} */ (document.querySelector('.esq-wrap'));
+  if(box && esqCtx.pxKm && box.dataset.ok === '1'){
     const cx = box.clientWidth / 2;
     esqWheelPend = {pkU:esqCtx.mn + (box.scrollLeft + cx - esqCtx.mL) / esqCtx.pxKm, cx, top:box.scrollTop};
   }
@@ -5788,8 +5842,16 @@ function esquemaCanvas(conPk, sinPk, elsAll){
   for(let p = Math.ceil(mn / step) * step; p <= mx; p += step){
     const x = X(p);
     s += '<line x1="' + x.toFixed(1) + '" y1="' + (topP - 10) + '" x2="' + x.toFixed(1) + '" y2="' + (H - 26) + '" stroke="#161f29" stroke-width="1"/>';
-    s += '<text x="' + x.toFixed(1) + '" y="' + (H - 10) + '" fill="#6a7d8c" font-size="10" text-anchor="middle">' + p.toFixed(dec).replace('.', ',') + '</text>';
   }
+  /* regla de PK: va en la cabecera, encima del esquema (esqCabecera) */
+  let regla = '<svg width="' + W + '" height="26">' +
+    '<line x1="' + mL + '" y1="25" x2="' + (W - mR) + '" y2="25" stroke="#33434f"/>';
+  for(let p = Math.ceil(mn / step) * step; p <= mx; p += step){
+    const x = X(p);
+    regla += '<line x1="' + x.toFixed(1) + '" y1="20" x2="' + x.toFixed(1) + '" y2="25" stroke="#33434f"/>' +
+      '<text x="' + x.toFixed(1) + '" y="15" fill="#6a7d8c" font-size="10" text-anchor="middle">' + p.toFixed(dec).replace('.', ',') + '</text>';
+  }
+  regla += '</svg>';
   /* zonas de clic por vía */
   s += '<rect data-via="" x="' + mL + '" y="' + (baseY - 22) + '" width="' + (W - mR - mL) + '" height="44" fill="transparent"/>';
   secs.forEach(v => { const y = yFor(v); s += '<rect data-via="' + esc(v) + '" x="' + mL + '" y="' + (y - 20) + '" width="' + (W - mR - mL) + '" height="40" fill="transparent"/>'; });
@@ -5993,13 +6055,15 @@ function esquemaCanvas(conPk, sinPk, elsAll){
   });
   s += '</svg>';
 
-  const box = el('div', {class:'esq-wrap', tabindex:'0'});
+  const box = el('div', {class:'esq-wrap esq-pk', tabindex:'0'});
   box.innerHTML = s;
-  /* guardar/restaurar la posición: el ancla es un PK, no un scroll en píxeles */
-  let _anclaT = 0;
+  /* guardar/restaurar la posición: el ancla es un PK, no un scroll en píxeles.
+     Se guarda al momento (antes iba con un retardo de 60 ms que, si llegaba un re-render en medio,
+     leía el contenedor ya retirado — scroll 0 — y el siguiente cambio saltaba al principio).
+     Tampoco se lee hasta que el contenedor nuevo tiene su posición devuelta (data-ok). */
   box.addEventListener('scroll', () => {
-    clearTimeout(_anclaT);
-    _anclaT = setTimeout(() => { esqAncla = {pk:mn + (box.scrollLeft - mL) / pxKm, top:box.scrollTop}; }, 60);
+    if(!box.isConnected || box.dataset.ok !== '1') return;
+    esqAncla = {pk:mn + (box.scrollLeft - mL) / pxKm, top:box.scrollTop};
   });
   const pkEn = clientX => { const svg = box.querySelector('svg'); const r = svg.getBoundingClientRect(); return esqCtx.mn + (clientX - r.left - esqCtx.mL) / esqCtx.pxKm; };
   const viaEn = clientY => { const svg = box.querySelector('svg'); const r = svg.getBoundingClientRect(); const yy = clientY - r.top;
@@ -6008,6 +6072,7 @@ function esquemaCanvas(conPk, sinPk, elsAll){
   /* zoom con la rueda, hacia el cursor */
   box.addEventListener('wheel', ev => {
     ev.preventDefault();
+    if(box.dataset.ok !== '1') return;   /* aún sin colocar: su scroll sería 0 */
     const r = box.getBoundingClientRect();
     const cx = ev.clientX - r.left;
     const pkU = esqCtx.mn + (box.scrollLeft + cx - esqCtx.mL) / esqCtx.pxKm;
@@ -6018,17 +6083,19 @@ function esquemaCanvas(conPk, sinPk, elsAll){
   /* restaurar la vista tras cualquier re-render (zoom, filtro, alta, edición…) */
   {
     const wp = esqWheelPend; esqWheelPend = null;
+    /* el destino del zoom pasa a ser el ancla YA: si llega otro render antes de aplicarlo, no se pierde */
+    if(wp) esqAncla = {pk:wp.pkU - wp.cx / pxKm, top:wp.top != null ? wp.top : (esqAncla ? esqAncla.top : null)};
     const an = esqAncla;
-    if(wp || an){
+    if(an){
       const poner = () => {
         if(!box.isConnected) return;
-        box.scrollLeft = wp ? (mL + (wp.pkU - mn) * pxKm) - wp.cx : mL + (an.pk - mn) * pxKm;
-        const t = wp && wp.top != null ? wp.top : (an ? an.top : null);
-        if(t != null) box.scrollTop = t;
+        box.scrollLeft = mL + (an.pk - mn) * pxKm;
+        if(an.top != null) box.scrollTop = an.top;
+        box.dataset.ok = '1';
       };
       requestAnimationFrame(poner);
       requestAnimationFrame(() => requestAnimationFrame(poner));
-    }
+    } else box.dataset.ok = '1';
   }
 
   /* zoom con dos dedos (pellizco) en móvil, anclado al punto medio de los dedos */
@@ -6170,7 +6237,8 @@ function esquemaCanvas(conPk, sinPk, elsAll){
     document.addEventListener('mousemove', mv);
     document.addEventListener('mouseup', up);
   });
-  return box;
+  /* barra de desplazamiento y regla de PK arriba, el esquema debajo */
+  return el('div', null, esqCabecera(box, W, regla, true), box);
 }
 
 /* ================= vista: Modelo de datos ================= */
