@@ -283,6 +283,7 @@ function migrar(){
     if(!Array.isArray(p.vias)) p.vias = [];
     if(!Array.isArray(p.lugares)) p.lugares = [];
     if(!Array.isArray(p.andenes)) p.andenes = [];
+    if(!Array.isArray(p.replanteos)) p.replanteos = [];
     if(p.modo !== 'diseno' && p.modo !== 'seguimiento') p.modo = 'seguimiento';
     if(!p.diseno || typeof p.diseno !== 'object') p.diseno = {};
     ['vias','agujas','piquetes','estaciones','pasos','existentes','generados'].forEach(k => { if(!Array.isArray(p.diseno[k])) p.diseno[k] = []; });
@@ -839,7 +840,7 @@ function render(){
   const _wy = window.scrollY, _misma = _vistaPrevia === currentView + '|' + modoActual();
   root.innerHTML = '';
   const dsg = modoActual() === 'diseno';
-  const map = {resumen:viewResumen, plano:viewPlano, esquema:viewEsquema, bd:viewBD, certif:viewCertificaciones, historial:viewHistorial, modelo:viewModelo, entrada:viewDatosEntrada, generar:viewGenerar};
+  const map = {resumen:viewResumen, plano:viewPlano, esquema:viewEsquema, bd:viewBD, certif:viewCertificaciones, replanteo:viewReplanteos, historial:viewHistorial, modelo:viewModelo, entrada:viewDatosEntrada, generar:viewGenerar};
   if(dsg){ map.esquema = viewEsquemaDiseno; map.bd = viewBDDiseno; map.cableado = viewCableado; map.esqcable = viewEsquemaCable; }
   if(dsg && !['entrada','generar','esquema','plano','bd','cableado','esqcable'].includes(currentView)) currentView = 'entrada';
   if(!dsg && ['entrada','generar','cableado','esqcable'].includes(currentView)) currentView = 'resumen';
@@ -906,7 +907,7 @@ function renderNav(){
   (modoActual() === 'diseno'
     ? [['entrada','Datos de entrada'], ['generar','Generar señalización'], ['esquema','Esquema por PK'], ['bd','Base de datos'],
        ['cableado','Cableado' + (np ? ' · ' + np : '')], ['esqcable','Esquema de cables'], ['plano','Plano']]
-    : [['resumen','Resumen'], ['plano','Plano'], ['esquema','Esquema'], ['bd','Base de datos'], ['certif','Certificaciones'], ['historial','Historial'], ['modelo','Modelo de datos']]
+    : [['resumen','Resumen'], ['plano','Plano'], ['esquema','Esquema'], ['bd','Base de datos'], ['certif','Certificaciones'], ['replanteo','Replanteos'], ['historial','Historial'], ['modelo','Modelo de datos']]
   ).forEach(([v, t]) => nav.appendChild(el('button', {class:'navi' + (currentView === v ? ' on' : ''), onclick:() => setView(v)}, t)));
 }
 function renderTopRight(){
@@ -940,6 +941,12 @@ function renderSub(){
       ...proyectosDelModo().map(p => el('option', {value:p.id, ...(p.id === state.proyectoActivo ? {selected:'selected'} : {})}, p.nombre))),
     el('button', {class:'btn sm', onclick:() => nuevoProyectoModal()}, '+ Nuevo')
   ));
+  const ra = modoActual() === 'diseno' ? null : repActivo();
+  if(ra) sub.appendChild(el('div', {style:'width:100%;margin-top:8px;padding:6px 12px;background:var(--ambbg);color:var(--amb);border-radius:8px;font-size:12px;font-weight:600;display:flex;gap:10px;align-items:center;flex-wrap:wrap'},
+    el('span', null, 'Replanteo en curso: ' + ra.nombre + ' · lo que añadas, borres o modifiques queda registrado en él'),
+    el('span', {class:'spacer'}),
+    currentView !== 'replanteo' ? el('button', {class:'btn sm', onclick:() => { repSel = ra.id; setView('replanteo'); }}, 'Ver cambios') : null,
+    el('button', {class:'btn sm red', onclick:() => repCerrar(ra)}, 'Cerrar replanteo')));
   if(fechaVista){
     const b = el('div', {style:'width:100%;margin-top:8px;padding:6px 12px;background:var(--ambbg);color:var(--amb);border-radius:8px;font-size:12px;font-weight:600'},
       'Viendo el proyecto a ' + new Date(fechaVista).toLocaleDateString('es-ES') + ' · solo lectura');
@@ -3915,6 +3922,9 @@ function viewCertificaciones(){
   c.appendChild(el('div', {class:'sec-title'}, 'Certificaciones', el('span', {class:'muted'}, proyActivo().nombre + ' · ' + els.length + ' elementos'),
     el('span', {class:'spacer'}),
     el('button', {class:'btn red sm', onclick:() => nuevoElemento()}, '+ Añadir elemento')));
+  c.appendChild(el('div', {style:'display:flex;gap:2px;background:var(--panel3);border-radius:8px;padding:2px;width:max-content;margin-bottom:12px'},
+    ...[['cert', 'Certificación'], ['inst', 'Instalados']].map(([k, t]) => el('button', {class:'btn sm ' + (certTab === k ? 'red' : 'ghost'), onclick:() => { certTab = k; render(); }}, t))));
+  if(certTab === 'inst') return viewInstalados(c);
   if(!els.length){ c.appendChild(el('div', {class:'note'}, 'El proyecto no tiene elementos. Usa "+ Añadir elemento" (los campos de certificación —estado, cantidad, cantidad certificada, nº de acopio— salen en la ficha de cualquier elemento).')); return c; }
   c.appendChild(el('p', {class:'hint', style:'margin-top:0'}, 'La certificación (estado, cantidad, cantidad certificada, nº de acopio) se rellena en la ficha de cada elemento.'));
 
@@ -4086,6 +4096,293 @@ function viewHistorial(){
   ));
   c.appendChild(wrap);
   if(filas.length > 500) c.appendChild(el('p', {class:'hint'}, 'Mostrando los 500 más recientes.'));
+  return c;
+}
+
+/* ================= Certificaciones → Instalados (avance por fechas) ================= */
+let certTab = 'cert', instDesde = '', instHasta = '';   /* fechas 'AAAA-MM-DD' */
+const estaInstalado = v => /instal|verific/i.test(v || '');
+const isoDia = ms => { const d = new Date(ms); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+/* «Fecha de instalación» tal como venga: 2026-09-15, 15/09/2026 o 15-09-26 */
+function fechaCampo(s){
+  s = String(s || '').trim(); if(!s) return NaN;
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if(m) return new Date(+m[1], +m[2] - 1, +m[3], 12).getTime();
+  m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/);
+  if(m){ const y = +m[3] < 100 ? 2000 + +m[3] : +m[3]; return new Date(y, +m[2] - 1, +m[1], 12).getTime(); }
+  return NaN;
+}
+/* cuándo quedó instalado un elemento (ms), o null si hoy no lo está.
+   1º la «Fecha de instalación» si está rellena; si no, el último paso de su «Estado de montaje» a
+   Instalado/Verificado según su historial de versiones (cada versión guarda cómo estaba ANTES del cambio);
+   si nunca cambió, desde que se dio de alta */
+function fechaInstalacion(e){
+  const t = getTipo(e.tipoId); if(!t) return null;
+  const refE = t.campos.find(r => { const c = getCampo(r.campoId); return c && c.etiqueta.toLowerCase().includes('estado'); });
+  if(!refE) return null;
+  const inst = v => estaInstalado((v || {})[refE.campoId]);
+  if(!inst(e.valores)) return null;
+  const fi = fechaCampo(e.valores.f_finst);
+  if(isFinite(fi)) return {ts:fi, origen:'Fecha de instalación'};
+  const h = e.hist || [];
+  for(let i = h.length - 1; i >= 0; i--) if(!inst(h[i].snap && h[i].snap.valores)) return {ts:h[i].ts, origen:'cambio de estado'};
+  return e.creado ? {ts:e.creado, origen:'alta del elemento'} : null;
+}
+function viewInstalados(c){
+  const pr = proyActivo();
+  /* elementos actuales del proyecto cuyo tipo tiene «Estado de montaje» (no depende de «Ver a fecha») */
+  const conEstado = e => { const t = getTipo(e.tipoId); return !!(t && t.campos.some(r => { const cp = getCampo(r.campoId); return cp && cp.etiqueta.toLowerCase().includes('estado'); })); };
+  const els = state.elementos.filter(e => e.proyectoId === pr.id && !e.borrado && conEstado(e));
+  const hoy = isoDia(Date.now());
+  if(!instHasta) instHasta = hoy;
+  if(!instDesde) instDesde = isoDia(Date.now() - 30 * 86400000);
+  const ini = new Date(instDesde + 'T00:00:00').getTime(), fin = new Date(instHasta + 'T23:59:59').getTime();
+  const fijar = (d, h) => { instDesde = d; instHasta = h; render(); };
+  const n = new Date(), mes0 = new Date(n.getFullYear(), n.getMonth(), 1), mesAnt0 = new Date(n.getFullYear(), n.getMonth() - 1, 1), mesAntF = new Date(n.getFullYear(), n.getMonth(), 0);
+  const primera = Math.min(Date.now(), ...state.elementos.filter(e => e.proyectoId === pr.id).map(e => e.creado || Date.now()));
+  c.appendChild(el('div', {class:'toolbar', style:'margin-bottom:12px'},
+    el('span', {class:'lab'}, 'Desde'), el('input', {type:'date', style:'width:auto', value:instDesde, onchange:e => { instDesde = e.target.value || instDesde; render(); }}),
+    el('span', {class:'lab'}, 'Hasta'), el('input', {type:'date', style:'width:auto', value:instHasta, onchange:e => { instHasta = e.target.value || instHasta; render(); }}),
+    el('button', {class:'btn sm', onclick:() => fijar(isoDia(Date.now() - 30 * 86400000), hoy)}, 'Últimos 30 días'),
+    el('button', {class:'btn sm', onclick:() => fijar(isoDia(mes0.getTime()), hoy)}, 'Este mes'),
+    el('button', {class:'btn sm', onclick:() => fijar(isoDia(mesAnt0.getTime()), isoDia(mesAntF.getTime()))}, 'Mes anterior'),
+    el('button', {class:'btn sm', onclick:() => fijar(isoDia(primera), hoy)}, 'Desde el inicio')));
+  if(ini > fin){ c.appendChild(el('div', {class:'note'}, 'La fecha «Desde» es posterior a «Hasta».')); return c; }
+  if(!els.length){ c.appendChild(el('div', {class:'note'}, 'Ningún elemento del proyecto tiene «Estado de montaje».')); return c; }
+  const datos = els.map(e => ({e, m:medidaDe(e), fi:fechaInstalacion(e)}));
+  const enPer = datos.filter(d => d.fi && d.fi.ts >= ini && d.fi.ts <= fin);
+  const fDia = s => new Date(s + 'T12:00:00').toLocaleDateString('es-ES');
+  const pc = (a, b) => b ? (Math.round(a / b * 1000) / 10).toLocaleString('es-ES') + '%' : '—';
+  const nAntes = datos.filter(d => d.fi && d.fi.ts < ini).length, nFin = datos.filter(d => d.fi && d.fi.ts <= fin).length;
+  const mLin = enPer.filter(d => d.m.lin).reduce((a, d) => a + d.m.total, 0);
+  const stat = (v, l, em) => el('div', {class:'stat'}, el('div', {class:'n', html: em ? '<em>' + esc(v) + '</em>' : esc(v)}), el('div', {class:'l'}, l));
+  c.appendChild(el('div', {class:'stats'},
+    stat(String(enPer.length), 'Elementos instalados en el periodo', true),
+    stat(mLin.toLocaleString('es-ES') + ' m', 'Metros instalados en el periodo'),
+    stat(pc(enPer.length, datos.length), 'Avance del periodo (nº de elementos)'),
+    stat(pc(nAntes, datos.length) + ' → ' + pc(nFin, datos.length), 'Acumulado al ' + fDia(instDesde) + ' → al ' + fDia(instHasta))));
+
+  c.appendChild(el('div', {class:'sec-title'}, 'Avance por tipo', el('span', {class:'muted'}, 'del ' + fDia(instDesde) + ' al ' + fDia(instHasta) + ' · metros en elementos con PK inicio–fin, unidades en el resto')));
+  const tipos = [...new Set(datos.map(d => d.e.tipoId))].map(getTipo).filter(Boolean).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+  const w = el('div', {class:'tablewrap'});
+  w.appendChild(el('table', null,
+    el('thead', null, el('tr', null, el('th', null, 'Tipo'), el('th', null, 'Ud.'), el('th', null, 'Total'),
+      el('th', null, 'Instalado al ' + fDia(instDesde)), el('th', null, 'Instalado en el periodo'), el('th', null, '% del periodo'),
+      el('th', null, 'Instalado al ' + fDia(instHasta)), el('th', null, '% acumulado'))),
+    el('tbody', null, ...tipos.map(t => {
+      const g = datos.filter(d => d.e.tipoId === t.id);
+      const sum = f => g.filter(f).reduce((a, d) => a + d.m.total, 0);
+      const tot = sum(() => true), antes = sum(d => d.fi && d.fi.ts < ini), per = sum(d => d.fi && d.fi.ts >= ini && d.fi.ts <= fin);
+      const u = g[0] ? g[0].m.unidad : 'ud', f = v => v.toLocaleString('es-ES');
+      return el('tr', null,
+        el('td', null, el('span', {class:'swatch', style:'display:inline-block;margin-right:7px;vertical-align:1px;background:' + t.color}), t.nombre),
+        el('td', {style:'color:var(--tx3)'}, u), el('td', null, f(tot)), el('td', null, f(antes)),
+        el('td', {style: per ? 'color:var(--grn);font-weight:700' : ''}, per ? '+' + f(per) : '—'),
+        el('td', null, per ? pc(per, tot) : '—'), el('td', null, f(antes + per)), el('td', null, pc(antes + per, tot)));
+    }))));
+  c.appendChild(w);
+
+  c.appendChild(el('div', {class:'sec-title'}, 'Instalados en el periodo', el('span', {class:'muted'}, enPer.length + ' elementos')));
+  if(!enPer.length){ c.appendChild(el('div', {class:'note'}, 'No se instaló nada entre esas fechas.')); }
+  else {
+    const w2 = el('div', {class:'tablewrap'});
+    w2.appendChild(el('table', null,
+      el('thead', null, el('tr', null, el('th', null, 'Fecha'), el('th', null, 'Código'), el('th', null, 'Tipo'), el('th', null, 'PK'), el('th', null, 'Medida'), el('th', null, 'Estado'), el('th', null, 'Fecha tomada de'), el('th', null, ''))),
+      el('tbody', null, ...enPer.sort((a, b) => a.fi.ts - b.fi.ts).map(d => {
+        const t = getTipo(d.e.tipoId) || {};
+        return el('tr', null,
+          el('td', {style:'white-space:nowrap'}, new Date(d.fi.ts).toLocaleDateString('es-ES')),
+          el('td', null, el('code', {class:'pill2'}, d.e.codigo || '—')),
+          el('td', null, el('span', {class:'swatch', style:'display:inline-block;margin-right:7px;vertical-align:1px;background:' + (t.color || '#888')}), t.nombre || '—'),
+          el('td', null, valorPK(d.e) || '—'),
+          el('td', null, d.m.total.toLocaleString('es-ES') + ' ' + d.m.unidad),
+          el('td', null, el('span', {class:'badge ' + estadoBadgeClass(valorEstado(d.e))}, valorEstado(d.e))),
+          el('td', {style:'color:var(--tx3);font-size:12px'}, d.fi.origen),
+          el('td', null, el('button', {class:'btn sm', onclick:() => nuevoElemento(d.e.id)}, 'Abrir')));
+      }))));
+    c.appendChild(w2);
+  }
+  c.appendChild(el('p', {class:'hint'}, 'La fecha de instalación sale de la «Fecha de instalación» del elemento si está rellena; si no, del momento en que su estado pasó a Instalado o Verificado. Para avances antiguos registrados tarde, rellena la «Fecha de instalación».'));
+  return c;
+}
+
+/* ================= vista: Replanteos ================= */
+/* Un replanteo es un evento: se abre con sus datos (descripción, objetivo, ámbito) y desde ese momento
+   todo lo que se añade, borra o modifica en el proyecto queda asociado a él hasta que se cierra.
+   Se guarda una foto de los elementos al abrirlo; al cerrarlo se compara y se guarda solo la lista de
+   cambios (la foto se descarta para no engordar proyecto.json). */
+let repSel = null;
+function repObjetivos(){ return ['General (varios tipos)', ...state.elementTypes.map(t => t.nombre), 'Vías / geometría']; }
+function repActivo(pr){ pr = pr || proyActivo(); return (pr && pr.modo !== 'diseno' && (pr.replanteos || []).find(r => !r.fin)) || null; }
+/* lo justo para comparar: código, tipo y valores, sin fotos */
+function repFoto(e){
+  const v = {};
+  for(const k in (e.valores || {})){ const x = e.valores[k]; if(x == null || x === '') continue; if(JSON.stringify(x).indexOf('data:') >= 0) continue; v[k] = x; }
+  return {codigo:e.codigo || '', tipoId:e.tipoId, valores:v};
+}
+function repElementos(pr){ return state.elementos.filter(e => e.proyectoId === pr.id && !e.borrado); }
+const repTipoNom = id => (getTipo(id) || {}).nombre || 'Elemento';
+const repPkTxt = f => { const t = getTipo(f.tipoId); if(!t) return ''; const p = t.campos.filter(r => (getCampo(r.campoId) || {}).tipo === 'pk').map(r => f.valores[r.campoId]).filter(Boolean); return p.join('–'); };
+/* cambios entre la foto del inicio y ahora: [{op:'alta'|'baja'|'mod', id, tipo, codigo, codigoAntes, pk, pkAntes, pkNum, campos:[{id, etq, pk, antes, despues}]}] */
+function repCalcular(rep, pr){
+  const base = rep.base || {}, act = {};
+  repElementos(pr).forEach(e => act[e.id] = repFoto(e));
+  const pkN = f => { const p = elemPK({tipoId:f.tipoId, valores:f.valores}); return [p.pu, p.ini, p.fin].filter(v => !isNaN(v)); };
+  const out = [];
+  for(const id in act) if(!base[id]) out.push({op:'alta', id, tipo:repTipoNom(act[id].tipoId), codigo:act[id].codigo, pk:repPkTxt(act[id]), pkNum:pkN(act[id])});
+  for(const id in base){
+    const a = base[id], b = act[id];
+    if(!b){ out.push({op:'baja', id, tipo:repTipoNom(a.tipoId), codigo:a.codigo, pk:repPkTxt(a), pkNum:pkN(a)}); continue; }
+    const campos = [];
+    if(a.codigo !== b.codigo) campos.push({id:'codigo', etq:'Código', antes:a.codigo, despues:b.codigo});
+    if(a.tipoId !== b.tipoId) campos.push({id:'tipo', etq:'Tipo', antes:repTipoNom(a.tipoId), despues:repTipoNom(b.tipoId)});
+    const ks = [...new Set(Object.keys(a.valores).concat(Object.keys(b.valores)))];
+    ks.forEach(k => {
+      const va = a.valores[k] == null ? '' : String(a.valores[k]), vb = b.valores[k] == null ? '' : String(b.valores[k]);
+      if(va === vb) return;
+      const cp = getCampo(k) || {};
+      campos.push({id:k, etq:cp.etiqueta || k, pk:cp.tipo === 'pk', antes:va, despues:vb});
+    });
+    if(campos.length) out.push({op:'mod', id, tipo:repTipoNom(b.tipoId), codigo:b.codigo, codigoAntes:a.codigo, pk:repPkTxt(b), pkAntes:repPkTxt(a), pkNum:pkN(a).concat(pkN(b)), campos});
+  }
+  const ord = {baja:0, mod:1, alta:2};
+  return out.sort((x, y) => ord[x.op] - ord[y.op] || (x.pkNum[0] || 0) - (y.pkNum[0] || 0));
+}
+const repMin = s => s ? s.charAt(0).toLowerCase() + s.slice(1) : s;
+/* frases legibles: «Señal E'1 pasa de estar en 11,047 a 11,092», «Se elimina señal E'2» */
+function repFrases(c){
+  const nom = c.tipo + ' ' + (c.codigo || '(sin código)');
+  if(c.op === 'alta') return ['Se añade ' + repMin(nom) + (c.pk ? ' en PK ' + c.pk : '')];
+  if(c.op === 'baja') return ['Se elimina ' + repMin(nom) + (c.pk ? ' (estaba en PK ' + c.pk + ')' : '')];
+  const f = [], vac = v => v === '' ? '(vacío)' : v;
+  const nomA = c.tipo + ' ' + (c.codigoAntes || '(sin código)');
+  const pks = c.campos.filter(x => x.pk), resto = c.campos.filter(x => !x.pk);
+  if(pks.length) f.push(nomA + ' pasa de estar en ' + vac(c.pkAntes) + ' a ' + vac(c.pk));
+  resto.forEach(x => {
+    if(x.id === 'codigo') f.push(nomA + ' pasa a llamarse ' + vac(x.despues));
+    else f.push(nomA + ': ' + x.etq + ' «' + vac(x.antes) + '» → «' + vac(x.despues) + '»');
+  });
+  return f;
+}
+function repAmbitoTxt(r){
+  const a = r.ambito || {};
+  if(a.tipo === 'estacion') return 'Estación ' + (a.lugar || '—');
+  if(a.tipo === 'pk') return 'PK ' + (a.pkIni || '?') + ' – ' + (a.pkFin || '?');
+  return 'Toda la línea';
+}
+/* ¿un cambio cae fuera del ámbito declarado? */
+function repFuera(r, c){
+  const a = r.ambito || {}; let lo, hi;
+  if(a.tipo === 'pk'){ lo = pkNum(a.pkIni); hi = pkNum(a.pkFin); }
+  else if(a.tipo === 'estacion'){ lo = +a.lugIni; hi = +a.lugFin; }
+  else return false;
+  if(!isFinite(lo) || !isFinite(hi) || !c.pkNum.length) return false;
+  if(lo > hi){ const t = lo; lo = hi; hi = t; }
+  return c.pkNum.every(v => v < lo - 1e-9 || v > hi + 1e-9);
+}
+function repFormulario(rep){
+  const pr = proyActivo(), lug = pr.lugares || [], n = (pr.replanteos || []).length + 1;
+  const r = rep || {nombre:'Replanteo ' + n, fecha:isoDia(Date.now()), descripcion:'', objetivo:repObjetivos()[0], ambito:{tipo:'linea'}};
+  const a = r.ambito || {tipo:'linea'};
+  const iNom = el('input', {type:'text', value:r.nombre});
+  const iFec = el('input', {type:'date', value:r.fecha || ''});
+  const iDes = el('textarea', {rows:'3', placeholder:'Qué se replantea y por qué'}); iDes.value = r.descripcion || '';
+  const objs = repObjetivos(); if(r.objetivo && objs.indexOf(r.objetivo) < 0) objs.push(r.objetivo);
+  const iObj = el('select', null, ...objs.map(o => el('option', {value:o, ...(o === r.objetivo ? {selected:'selected'} : {})}, o)));
+  const iAmb = el('select', null, ...[['linea', 'Toda la línea'], ['estacion', 'Una estación'], ['pk', 'Tramo de PK']].map(([v, t]) => el('option', {value:v, ...(v === a.tipo ? {selected:'selected'} : {})}, t)));
+  const iLug = el('select', null, ...(lug.length ? lug.map(l => el('option', {value:l.id, ...(l.id === a.lugarId ? {selected:'selected'} : {})}, l.nombre)) : [el('option', {value:''}, 'No hay lugares: créalos en Esquema → Lugares')]));
+  const iPi = el('input', {type:'text', placeholder:'p. ej. 11,000', value:a.pkIni || ''}), iPf = el('input', {type:'text', placeholder:'p. ej. 11,500', value:a.pkFin || ''});
+  const fila = (lab, inp) => el('label', {style:'display:block;margin-bottom:10px'}, el('div', {class:'lab', style:'margin-bottom:4px'}, lab), inp);
+  const bLug = fila('Estación', iLug), bPk = el('div', {style:'display:flex;gap:10px'}, fila('PK desde', iPi), fila('PK hasta', iPf));
+  const vis = () => { bLug.style.display = iAmb.value === 'estacion' ? '' : 'none'; bPk.style.display = iAmb.value === 'pk' ? 'flex' : 'none'; };
+  iAmb.addEventListener('change', vis); vis();
+  const body = el('div', null, fila('Nombre', iNom), fila('Fecha', iFec), fila('Descripción', iDes), fila('Objetivo del replanteo', iObj), fila('Ámbito', iAmb), bLug, bPk,
+    rep ? null : el('p', {class:'hint'}, 'Al empezarlo, todo lo que añadas, borres o modifiques en este proyecto queda registrado en el replanteo hasta que lo cierres.'));
+  openModal(rep ? 'Datos del replanteo' : 'Nuevo replanteo', body, () => {
+    const amb = {tipo:iAmb.value};
+    if(amb.tipo === 'estacion'){
+      const l = lug.find(x => x.id === iLug.value);
+      if(!l){ alert('Elige una estación (hay que crear antes los lugares en el Esquema).'); return false; }
+      Object.assign(amb, {lugarId:l.id, lugar:l.nombre, lugIni:l.pkIni, lugFin:l.pkFin});
+    }
+    if(amb.tipo === 'pk'){
+      if(isNaN(pkNum(iPi.value)) || isNaN(pkNum(iPf.value))){ alert('Pon el PK de inicio y de fin del tramo.'); return false; }
+      Object.assign(amb, {pkIni:iPi.value.trim(), pkFin:iPf.value.trim()});
+    }
+    if(!iDes.value.trim()){ alert('Pon una descripción del replanteo.'); return false; }
+    const datos = {nombre:iNom.value.trim() || ('Replanteo ' + n), fecha:iFec.value, descripcion:iDes.value.trim(), objetivo:iObj.value, ambito:amb};
+    if(rep){ Object.assign(rep, datos); registrarCambio('replanteo', 'Datos de ' + rep.nombre + ' editados'); }
+    else {
+      const base = {}; repElementos(pr).forEach(e => base[e.id] = repFoto(e));
+      const nr = Object.assign({id:uid(), inicio:Date.now(), fin:null, base, cambios:null}, datos);
+      pr.replanteos = pr.replanteos || []; pr.replanteos.push(nr); repSel = nr.id;
+      registrarCambio('replanteo', 'Inicio de ' + nr.nombre + ' · ' + nr.objetivo + ' · ' + repAmbitoTxt(nr));
+    }
+    save(); setView('replanteo');
+  });
+}
+function repCerrar(rep){
+  const pr = proyActivo(), cam = repCalcular(rep, pr);
+  if(!confirm('¿Cerrar «' + rep.nombre + '»? Se guardan ' + cam.length + ' cambio(s) y lo que hagas después ya no contará en este replanteo.')) return;
+  rep.cambios = cam; rep.fin = Date.now(); delete rep.base;
+  registrarCambio('replanteo', 'Cierre de ' + rep.nombre + ' · ' + cam.filter(c => c.op === 'alta').length + ' altas, ' + cam.filter(c => c.op === 'baja').length + ' bajas, ' + cam.filter(c => c.op === 'mod').length + ' modificados');
+  save(); render();
+}
+function viewReplanteos(){
+  const c = el('div', null), pr = proyActivo(), reps = pr.replanteos || [], act = repActivo(pr);
+  c.appendChild(el('div', {class:'sec-title'}, 'Replanteos', el('span', {class:'muted'}, pr.nombre + ' · ' + reps.length + ' registrados'),
+    el('span', {class:'spacer'}),
+    act ? null : el('button', {class:'btn red sm', onclick:() => { if(!soloLectura()) repFormulario(null); }}, '+ Nuevo replanteo')));
+  if(!reps.length){ c.appendChild(el('div', {class:'note'}, 'No hay replanteos. «+ Nuevo replanteo» abre uno: pones su descripción, objetivo y ámbito, y todo lo que cambies en el proyecto mientras esté abierto queda registrado en él, con un resumen al final.')); return c; }
+  if(!repSel || !reps.some(r => r.id === repSel)) repSel = (act || reps[reps.length - 1]).id;
+  const w = el('div', {class:'tablewrap'});
+  w.appendChild(el('table', null,
+    el('thead', null, el('tr', null, el('th', null, 'Replanteo'), el('th', null, 'Fecha'), el('th', null, 'Objetivo'), el('th', null, 'Ámbito'), el('th', null, 'Estado'), el('th', null, 'Altas'), el('th', null, 'Bajas'), el('th', null, 'Modif.'))),
+    el('tbody', null, ...reps.slice().reverse().map(r => {
+      const cam = r.fin ? (r.cambios || []) : repCalcular(r, pr), k = op => cam.filter(x => x.op === op).length;
+      return el('tr', {style:'cursor:pointer' + (r.id === repSel ? ';background:var(--panel3)' : ''), onclick:() => { repSel = r.id; render(); }},
+        el('td', null, el('b', null, r.nombre)), el('td', {style:'white-space:nowrap'}, r.fecha ? new Date(r.fecha + 'T12:00:00').toLocaleDateString('es-ES') : '—'),
+        el('td', null, r.objetivo || '—'), el('td', null, repAmbitoTxt(r)),
+        el('td', null, el('span', {class:'pill ' + (r.fin ? 'gray' : 'amber')}, r.fin ? 'Cerrado' : 'En curso')),
+        el('td', null, String(k('alta'))), el('td', null, String(k('baja'))), el('td', null, String(k('mod'))));
+    }))));
+  c.appendChild(w);
+
+  const r = reps.find(x => x.id === repSel);
+  const cam = r.fin ? (r.cambios || []) : repCalcular(r, pr);
+  c.appendChild(el('div', {class:'sec-title'}, r.nombre, el('span', {class:'muted'}, r.fin
+      ? 'del ' + new Date(r.inicio).toLocaleString('es-ES') + ' al ' + new Date(r.fin).toLocaleString('es-ES')
+      : 'en curso desde ' + new Date(r.inicio).toLocaleString('es-ES')),
+    el('span', {class:'spacer'}),
+    el('button', {class:'btn sm', onclick:() => { if(!soloLectura()) repFormulario(r); }}, 'Editar datos'),
+    el('button', {class:'btn sm', onclick:() => {
+      const txt = r.nombre + ' (' + (r.fecha || '') + ')\n' + r.objetivo + ' · ' + repAmbitoTxt(r) + '\n' + r.descripcion + '\n\n' + (cam.length ? cam.map(x => repFrases(x).map(f => '- ' + f + (repFuera(r, x) ? ' [fuera del ámbito]' : '')).join('\n')).join('\n') : 'Sin cambios.');
+      (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject()).then(() => alert('Resumen copiado.'), () => prompt('Copia el resumen:', txt)); }}, 'Copiar resumen'),
+    r.fin ? el('button', {class:'btn sm danger', onclick:() => { if(soloLectura()) return; if(!confirm('¿Borrar el registro de «' + r.nombre + '»? Los cambios hechos en los elementos se quedan; solo se borra este resumen.')) return;
+        pr.replanteos = reps.filter(x => x !== r); repSel = null; registrarCambio('replanteo', 'Registro de ' + r.nombre + ' borrado'); save(); render(); }}, 'Borrar registro')
+      : el('button', {class:'btn red sm', onclick:() => { if(!soloLectura()) repCerrar(r); }}, 'Cerrar replanteo')));
+  c.appendChild(el('div', {class:'kpis'},
+    ...[['Objetivo', r.objetivo || '—'], ['Ámbito', repAmbitoTxt(r)], ['Altas', String(cam.filter(x => x.op === 'alta').length)], ['Bajas', String(cam.filter(x => x.op === 'baja').length)], ['Modificados', String(cam.filter(x => x.op === 'mod').length)]]
+      .map(([k, v]) => el('div', {class:'kpi'}, el('div', {class:'k'}, k), el('div', {class:'v', style:'font-size:16px'}, v)))));
+  if(r.descripcion) c.appendChild(el('p', {style:'margin:12px 0;color:var(--tx2)'}, r.descripcion));
+  if(!cam.length){ c.appendChild(el('div', {class:'note'}, r.fin ? 'Este replanteo se cerró sin cambios.' : 'Aún no hay cambios. Trabaja en el Esquema, la Base de datos o las fichas: lo que añadas, borres o modifiques aparecerá aquí.')); return c; }
+  const grupo = (op, tit, col) => {
+    const g = cam.filter(x => x.op === op); if(!g.length) return;
+    c.appendChild(el('div', {class:'sec-title', style:'font-size:14px'}, tit, el('span', {class:'muted'}, String(g.length))));
+    const ul = el('div', {class:'tablewrap', style:'padding:4px 0'});
+    g.forEach(x => {
+      const vivo = state.elementos.some(e => e.id === x.id && !e.borrado), fuera = repFuera(r, x);
+      ul.appendChild(el('div', {style:'display:flex;gap:10px;align-items:flex-start;padding:7px 14px;border-bottom:1px solid var(--line)'},
+        el('span', {class:'dot', style:'margin-top:6px;background:' + col}),
+        el('div', {style:'flex:1'}, ...repFrases(x).map(f => el('div', null, f)),
+          fuera ? el('div', {style:'color:var(--amb);font-size:11px;margin-top:2px'}, 'fuera del ámbito del replanteo') : null),
+        vivo ? el('button', {class:'btn sm', onclick:() => nuevoElemento(x.id)}, 'Abrir') : null));
+    });
+    c.appendChild(ul);
+  };
+  grupo('baja', 'Eliminados', 'var(--red)');
+  grupo('mod', 'Modificados', 'var(--amb)');
+  grupo('alta', 'Añadidos', 'var(--grn)');
   return c;
 }
 
