@@ -50,6 +50,21 @@ function nagDistParada(linea, cat, decl, v){
   const val = arr[(vq - 30) / 5];
   return (val === '' || val == null) ? null : +val;
 }
+/* distancia de frenado a parada (m) con redondeo del lado de la seguridad, el de la herramienta de
+   PN EEN-UTI-350: declividad hacia la peor (hacia abajo) y velocidad al múltiplo de 5 superior.
+   Fuera de tabla (más pendiente que la última fila, o más velocidad que la última columna) da
+   null: no se extrapola hacia el lado inseguro. Devuelve {m, decl, v} con los valores de tabla. */
+function nagDistParadaSegura(linea, cat, decl, v){
+  const T = NAG_DFP[nagRedKey(linea, cat)]; if(!T) return null;
+  const ds = Object.keys(T).map(Number);
+  const dR = Math.min(Math.max(...ds), Math.floor((decl || 0) + 1e-9));
+  if(dR < Math.min(...ds) || T[dR] == null) return null;
+  const arr = ('' + T[dR]).split(','), vMax = 30 + (arr.length - 1) * 5;
+  const vq = Math.max(30, Math.ceil((v || 0) / 5 - 1e-9) * 5);
+  if(vq > vMax) return null;
+  const val = arr[(vq - 30) / 5];
+  return (val === '' || val == null) ? null : {m:+val, decl:dR, v:vq};
+}
 /* curva {vel,dist} para vi = 30..viMax (paso 10) */
 function nagCurvaFrenado(linea, cat, decl){
   const T = NAG_DFP[nagRedKey(linea, cat)]; if(!T) return [];
@@ -286,7 +301,7 @@ function migrar(){
     if(!Array.isArray(p.replanteos)) p.replanteos = [];
     if(p.modo !== 'diseno' && p.modo !== 'seguimiento') p.modo = 'seguimiento';
     if(!p.diseno || typeof p.diseno !== 'object') p.diseno = {};
-    ['vias','agujas','piquetes','estaciones','pasos','existentes','generados'].forEach(k => { if(!Array.isArray(p.diseno[k])) p.diseno[k] = []; });
+    ['vias','agujas','piquetes','estaciones','pasos','perfil','existentes','generados'].forEach(k => { if(!Array.isArray(p.diseno[k])) p.diseno[k] = []; });
     if(!p.diseno.parametros || typeof p.diseno.parametros !== 'object') p.diseno.parametros = {linea:'Convencional', bloqueo:'BAU', sistemas:'ASFA + ERTMS N2', gradiente:'', catAM:'', distFrenado:[]};
     if(/^RAM$/i.test(p.diseno.parametros.linea || '')) p.diseno.parametros.linea = 'Ancho Métrico';
     if(p.diseno.parametros.catAM == null) p.diseno.parametros.catAM = '';
@@ -1057,7 +1072,15 @@ const DZCOLS = {
     {k:'pk',     t:'PK',                ph:'1+424'},
     {k:'tipo',   t:'Tipo',             o:['SLA','SBA','SBE','Automático','Manual']},
     {k:'vias',   t:'Vías que cruza',    ph:'1,3'},
-    {k:'aviso',  t:'Distancia de aviso (m)', ph:'1800'}
+    {k:'aviso',  t:'Distancia de aviso (m)', ph:'1800'},
+    {k:'vel',    t:'Velocidad (km/h)',  ph:'155 ó 155/140'}
+  ],
+  /* perfil longitudinal: lo usan las señales de paso a nivel para la declividad media entre la
+     señal y el paso. Signo como en la herramienta de PN: + rampa en sentido PK creciente. */
+  perfil:[
+    {k:'pkIni',  t:'PK inicio',         ph:'316+010'},
+    {k:'pkFin',  t:'PK fin',            ph:'316+188'},
+    {k:'decl',   t:'Declividad (‰)',    ph:'-0,12'}
   ]
 };
 /* Curva de distancia de frenado ORIENTATIVA (conducción manual, freno de servicio, Red Convencional,
@@ -1073,7 +1096,7 @@ function disenoDe(){
   if(!pr) return {vias:[], agujas:[], piquetes:[], estaciones:[], generados:[], parametros:{}};
   if(!pr.diseno || typeof pr.diseno !== 'object') pr.diseno = {};
   const d = pr.diseno;
-  ['vias','agujas','piquetes','estaciones','pasos','existentes','generados'].forEach(k => { if(!Array.isArray(d[k])) d[k] = []; });
+  ['vias','agujas','piquetes','estaciones','pasos','perfil','existentes','generados'].forEach(k => { if(!Array.isArray(d[k])) d[k] = []; });
   d.generados.forEach(g => { if(!g.id) g.id = uid(); });
   if(!d.parametros || typeof d.parametros !== 'object') d.parametros = {linea:'Convencional', bloqueo:'BAU', sistemas:'ASFA + ERTMS N2', gradiente:'', catAM:'', vmax:'', cantones:'', distFrenado:[]};
   if(!Array.isArray(d.parametros.distFrenado)) d.parametros.distFrenado = [];
@@ -1100,6 +1123,7 @@ function viewDatosEntrada(){
   c.appendChild(dzTabla('Piquetes', 'piquetes', DZCOLS.piquetes));
   c.appendChild(dzTabla('Estaciones', 'estaciones', DZCOLS.estaciones));
   c.appendChild(dzTabla('Pasos a nivel', 'pasos', DZCOLS.pasos));
+  c.appendChild(dzTabla('Perfil de declividad (opcional, para las señales de paso a nivel)', 'perfil', DZCOLS.perfil));
   c.appendChild(dzTabla('Señalización ya existente', 'existentes', DZCOLS.existentes));
   c.appendChild(dzParametros());
   return c;
@@ -1210,6 +1234,7 @@ async function dzDescargarPlantilla(){
   hoja('Piquetes', DZCOLS.piquetes, d.piquetes);
   hoja('Estaciones', DZCOLS.estaciones, d.estaciones);
   hoja('PasosNivel', DZCOLS.pasos, d.pasos);
+  hoja('Perfil', DZCOLS.perfil, d.perfil);
   hoja('SenalesExistentes', DZCOLS.existentes, d.existentes);
   const wp = wb.addWorksheet('Parametros');
   wp.columns = [{header:'Tipo de línea', key:'linea', width:26}, {header:'Categoría RAM', key:'catAM', width:14}, {header:'Bloqueo', key:'bloqueo', width:12}, {header:'Sistemas', key:'sistemas', width:22}, {header:'Gradiente medio (‰)', key:'gradiente', width:22}, {header:'Velocidad máxima (km/h)', key:'vmax', width:22}, {header:'Máx. cantones por trayecto', key:'cantones', width:26}, {header:'Canalización de cables', key:'canaliz', width:24}];
@@ -1233,7 +1258,8 @@ async function dzDescargarPlantilla(){
    'Piquetes: PK y las dos vías que separa.',
    'Estaciones: PK inicio y fin (repite el mismo valor para un punto).',
    'SenalesExistentes: señalización que YA está montada y que el diseño debe respetar (por ejemplo la entrada y la avanzada de una estación colateral de la que no tienes la geometría). Código + PK + Tipo. «Sentido que protege»: si lo dejas vacío se deduce de la paridad del código (par = PK creciente, impar = decreciente, como E2/E1). Estas señales NO se recalculan, sirven de anclaje para repartir las señales de trayecto y no se envían a Seguimiento porque no son obra nueva.',
-   'PasosNivel: un PK por paso a nivel (cruza la vía en un punto, no recorre nada). Tipo: SLA (luminosa y acústica) / SBA (semibarreras automáticas) / SBE (semibarreras enclavadas) / Automático / Manual. «Vías que cruza»: números separados por comas, en blanco = todas. «Distancia de aviso»: metros desde el paso hasta el pedal de aviso; si la rellenas se generan los pedales a ambos lados. La app clasifica cada paso en enclavado / afectado / automático (NAS 811 §6.9), aparta las señales de la zona de paso y avisa si un paso queda dentro de la zona de deslizamiento de una señal (§6.2).',
+   'PasosNivel: un PK por paso a nivel (cruza la vía en un punto, no recorre nada). Tipo: SLA (luminosa y acústica) / SBA (semibarreras automáticas) / SBE (semibarreras enclavadas) / Automático / Manual. «Vías que cruza»: números separados por comas, en blanco = todas. «Distancia de aviso»: metros desde el paso hasta el pedal de aviso; si la rellenas se generan los pedales a ambos lados. «Velocidad»: la del tren al llegar a la señal de paso a nivel, una para los dos sentidos (155) o creciente/decreciente (155/140); vacía = la máxima de la vía. En los SLA y SBA que no están entre las señales de entrada de una estación se generan las señales de paso a nivel SPN C/D a la distancia de frenado de la NAG 0-8-5.0 (Anejo 6, caso práctico 03) y, si no hay distancia de aviso, los pedales a 400 m (SLA) o 18 s·V + 300 m (SBA) antes de la señal. La app clasifica cada paso en enclavado / afectado / automático (NAS 811 §6.9), aparta las señales de la zona de paso y avisa si un paso queda dentro de la zona de deslizamiento de una señal (§6.2).',
+   'Perfil (opcional): tramos de declividad de la línea, PK inicio, PK fin y declividad en ‰ con signo (+ rampa en sentido PK creciente, − pendiente). Se puede pegar tal cual la tabla de la herramienta de PN (PK en metros). Sólo lo usan las señales de paso a nivel; donde no llega se toma el gradiente de Parámetros.',
    'Parametros: una sola fila. Tipo de línea: Convencional / Convencional (Altas Prestaciones) / Alta Velocidad / Ancho Métrico. Categoría RAM: 0, I o II (solo si la línea es Ancho Métrico). Gradiente medio en ‰, negativo = pendiente. «Máx. cantones por trayecto»: déjalo vacío y la app reparte las señales intermedias sin superar los 3 km entre Parada y el Anuncio de Parada anterior (5,5 km en AV), que es el criterio del Anejo 1 de la NAS 811. Pon un número si el proyecto lleva menos cantones por capacidad: es un tope, los trayectos que ya necesitan menos no se parten (NAS 811 §6.2).',
    'DistFrenado: la app ya usa automáticamente la tabla de la NAG 0-8-5.0 (ED1+M1+M2) según tipo de línea, categoría y gradiente. Esta hoja es solo un override manual: si la dejas con estos valores (los de la NAG para tus parámetros) o vacía, se usa la NAG; si pones otros, se usan esos.'
   ].forEach(t => wg.addRow([t]));
@@ -1253,7 +1279,7 @@ async function abrirExcelAuto(file){
     await wb.xlsx.load(await file.arrayBuffer());
     hojas = wb.worksheets.map(w => norm(w.name));
   }catch(e){ alert('No se pudo leer el Excel: ' + e.message); return; }
-  const dis = ['vias', 'agujas', 'piquetes', 'estaciones', 'pasosnivel', 'senalesexistentes', 'parametros'];
+  const dis = ['vias', 'agujas', 'piquetes', 'estaciones', 'pasosnivel', 'perfil', 'senalesexistentes', 'parametros'];
   const nDis = hojas.filter(h => dis.includes(h)).length;
   const nSeg = state.elementTypes.filter(t => hojas.includes(norm(nombreHoja(t.nombre)))).length;
   if(nDis >= 2 && nDis >= nSeg){
@@ -1297,7 +1323,7 @@ async function dzLeerPlantilla(file){
     return out;
   };
   const msg = [];
-  /** @type {[string, string, any][]} */([['Vias', 'vias', DZCOLS.vias], ['Agujas', 'agujas', DZCOLS.agujas], ['Piquetes', 'piquetes', DZCOLS.piquetes], ['Estaciones', 'estaciones', DZCOLS.estaciones], ['PasosNivel', 'pasos', DZCOLS.pasos], ['SenalesExistentes', 'existentes', DZCOLS.existentes]])
+  /** @type {[string, string, any][]} */([['Vias', 'vias', DZCOLS.vias], ['Agujas', 'agujas', DZCOLS.agujas], ['Piquetes', 'piquetes', DZCOLS.piquetes], ['Estaciones', 'estaciones', DZCOLS.estaciones], ['PasosNivel', 'pasos', DZCOLS.pasos], ['Perfil', 'perfil', DZCOLS.perfil], ['SenalesExistentes', 'existentes', DZCOLS.existentes]])
     .forEach(([nom, key, cols]) => { const r = leerHoja(nom, cols); if(r){ d[key] = r; msg.push(r.length + ' ' + key); } });
   const wp = wb.worksheets.find(w => w.name.toLowerCase() === 'parametros');
   if(wp){
@@ -1365,7 +1391,7 @@ function dzProyectosCard(){
 function dzVaciarProyecto(){
   const d = disenoDe();
   if(!confirm('Se borrarán los datos de diseño (vías, agujas, piquetes, estaciones y elementos generados) del proyecto "' + (proyActivo().nombre || '') + '". ¿Continuar?')) return;
-  d.vias = []; d.agujas = []; d.piquetes = []; d.estaciones = []; d.pasos = []; d.existentes = []; d.generados = [];
+  d.vias = []; d.agujas = []; d.piquetes = []; d.estaciones = []; d.pasos = []; d.perfil = []; d.existentes = []; d.generados = [];
   d.parametros = {linea:'Convencional', bloqueo:'BAU', sistemas:'ASFA + ERTMS N2', gradiente:'', catAM:'', vmax:'', cantones:'', distFrenado:[]};
   registrarCambio('baja', 'datos de diseño vaciados');
   save(); currentView = 'entrada'; render();
@@ -1458,8 +1484,29 @@ function dzGenerar(){
     est:String(p.est || '').trim(),
     pk:pkNum(p.pk), tipo:String(p.tipo || '').trim() || 'Automático',
     vias:(String(p.vias || '').match(/\d{1,2}/g) || []),
-    aviso:Math.max(0, parseFloat(String(p.aviso || '').replace(',', '.')) || 0)
+    aviso:Math.max(0, parseFloat(String(p.aviso || '').replace(',', '.')) || 0),
+    /* velocidad al llegar a la señal de PN: «155» los dos sentidos, «155/140» creciente/decreciente */
+    vel:(String(p.vel || '').match(/\d+(?:[.,]\d+)?/g) || []).map(x => parseFloat(x.replace(',', '.'))).filter(x => x > 0)
   })).filter(p => isFinite(p.pk)).sort((x, y) => x.pk - y.pk);
+  /* perfil de declividad (‰, + = rampa en sentido PK creciente). Sólo lo usan las señales de PN. */
+  const perfil = (d.perfil || []).map(r => {
+    let a = pkNum(r.pkIni), b = pkNum(r.pkFin);
+    if(b < a){ const t = a; a = b; b = t; }
+    return {a, b, g:parseFloat(String(r.decl == null ? '' : r.decl).replace(',', '.'))};
+  }).filter(r => isFinite(r.a) && isFinite(r.b) && r.b > r.a && isFinite(r.g));
+  /* declividad media entre dos PK vista en el sentido de marcha dd, ponderada por longitud como
+     en la herramienta de PN. Lo que el perfil no cubre toma el gradiente de Parámetros. */
+  const declMedia = (x1, x2, dd) => {
+    const lo = Math.min(x1, x2), hi = Math.max(x1, x2), L = hi - lo;
+    const sinPerfil = {decl:grad, fuente:'gradiente de Parámetros'};
+    if(!perfil.length) return sinPerfil;
+    if(L < 1e-6){ const s = perfil.find(r => r.a <= lo && lo <= r.b); return s ? {decl:dd * s.g, fuente:'perfil'} : sinPerfil; }
+    let sum = 0, cub = 0;
+    perfil.forEach(r => { const s = Math.min(hi, r.b) - Math.max(lo, r.a); if(s > 0){ sum += s * dd * r.g; cub += s; } });
+    if(cub <= 1e-9) return sinPerfil;
+    const hueco = Math.max(0, L - cub);
+    return {decl:(sum + hueco * grad) / (cub + hueco), fuente:hueco > 0.001 ? 'perfil + gradiente de Parámetros' : 'perfil'};
+  };
   const agujas = (d.agujas || []).map(a => ({
     nom:String(a.nombre || '').trim() || '?', est:String(a.est || '').trim(), jca:pkNum(a.pkJCA), piq:pkNum(a.pkPiq),
     vo:String(a.viaOrig || '').trim(), vd:String(a.viaDest || '').trim(),
@@ -1808,6 +1855,66 @@ function dzGenerar(){
     if(nEx) notas.push(nEx + ' señal(es) declaradas como ya existentes: se respetan tal cual y anclan el trayecto contiguo'
       + (nDed ? ' (' + nDed + ' con el sentido deducido de la paridad del código; ponlo a mano si alguna no es así)' : '') + '.');
   }
+  /* --- señales de paso a nivel (SPN) y pedales de aviso ---
+     NAG 0-8-5.0 Anejo 6, caso práctico 03: la SPN va a la distancia de frenado hasta parada de la
+     tabla de la red, con la velocidad del tramo y la declividad entre la señal y el paso. Redondeo y
+     pedales como en la herramienta EEN-UTI-350 v1.1: declividad hacia la peor, velocidad al múltiplo
+     de 5 superior; pedal a 400 m de la señal en SLA y a 18 s·V + 300 m en SBA. Sólo SLA y SBA, que
+     son los que cubre la herramienta, y sólo fuera de las señales de entrada de una estación: el
+     enclavado lo gestiona el enclavamiento (NAS 811 §6.9). Se calcula antes del trayecto porque el
+     bloqueo BLA corta sus secciones en los pedales; los elementos se añaden con los pasos a nivel. */
+  const entradasDe = est => gen.filter(g => g.tipo === 'Señal de entrada' && g.est === est)
+    .map(g => pkNum(g.pk)).filter(x => isFinite(x));
+  const rangosEst = Object.keys(grupos).map(k => {
+    const e = k === '(trayecto)' ? '' : k, es = entradasDe(e);
+    return es.length < 2 ? null : {e, lo:Math.min(...es), hi:Math.max(...es)};
+  }).filter(r => r);
+  {
+    const sinTabla = [], sinTipo = [];
+    pasos.forEach(p => {
+      p._encl = rangosEst.find(x => p.pk >= x.lo && p.pk <= x.hi) || null;
+      p._spn = [];
+      p.avC = p.avD = p.aviso;   /* distancia del paso al pedal en cada sentido */
+      if(p._encl) return;
+      if(!/^(SLA|SBA)$/i.test(p.tipo)){ sinTipo.push(p.nom + ' (' + p.tipo + ')'); return; }
+      const vs = p.vias.length ? p.vias : [viaGenNum];
+      [1, -1].forEach(dd => {
+        const vDir = vs.filter(n => { const v = vFind(p.est, n); return !v || !v.sent || v.sent === dd; });
+        vDir.forEach(num => {
+          const vObj = vFind(p.est, num);
+          const vIn = p.vel[dd === 1 ? 0 : 1] || p.vel[0] || (vObj && vObj.vmax) || vmaxLinea;
+          /* la declividad depende de dónde cae la señal: se itera como en la herramienta */
+          let L = 0, m = null, r = null;
+          const vistos = [];
+          for(let i = 0; i < 40; i++){
+            m = declMedia(p.pk, p.pk - dd * L / 1000, dd);
+            r = nagDistParadaSegura(P.linea, P.catAM, m.decl, vIn);
+            if(!r || r.m === L) break;
+            const j = vistos.indexOf(r.m);
+            if(j >= 0){   /* oscila entre dos o más posiciones: se queda la más alejada */
+              L = Math.max(...vistos.slice(j));
+              m = declMedia(p.pk, p.pk - dd * L / 1000, dd);
+              r = nagDistParadaSegura(P.linea, P.catAM, m.decl, vIn);
+              break;
+            }
+            vistos.push(r.m); L = r.m;
+          }
+          const sent = (dd === 1 ? 'creciente' : 'decreciente') + (vDir.length > 1 ? ' vía ' + num : '');
+          if(!r){
+            sinTabla.push(p.nom + ' sentido ' + sent + ': ' + (nagDistParadaSegura(P.linea, P.catAM, 0, vIn)
+              ? 'declividad de ' + Math.floor(m.decl) + '‰, más pendiente que la tabla' : vIn + ' km/h, por encima de la tabla'));
+            return;
+          }
+          const dist = Math.max(L, r.m), pedalM = /SLA/i.test(p.tipo) ? 400 : Math.round(18 * vIn / 3.6 + 300);
+          p._spn.push({dd, via:num, suf:vDir.length > 1 ? ' V' + num : '', dist, pkS:p.pk - dd * dist / 1000,
+            decl:m.decl, fuente:m.fuente, r, vIn, vFuente:p.vel.length ? 'la columna Velocidad' : 'la vía ' + num, pedalM});
+          if(!p.aviso){ if(dd === 1) p.avC = Math.max(p.avC, dist + pedalM); else p.avD = Math.max(p.avD, dist + pedalM); }
+        });
+      });
+    });
+    if(sinTabla.length) notas.push('Señales de paso a nivel sin generar porque se salen de la tabla de la NAG 0-8-5.0 (no se extrapola hacia el lado inseguro): ' + sinTabla.join(' · ') + '. Requiere análisis.');
+    if(sinTipo.length) notas.push('Pasos a nivel sin señal de paso a nivel por no ser SLA ni SBA (tipo vacío = Automático): ' + sinTipo.join(', ') + '. Si alguno lo es, indícalo en su columna «Tipo».');
+  }
   /* --- cadencia de señales en el trayecto entre estaciones consecutivas (NAS 811 §6.2) ---
      El tramo va de la avanzada de salida de una estación a la avanzada de entrada de la siguiente. */
   {
@@ -1951,8 +2058,8 @@ function dzGenerar(){
           /* NAS 818 §4 (BLAU/BLAD/BLAB): en el trayecto no hay señales con indicación de Parada,
              pero sí detección de trenes: una única sección, o varias consecutivas para establecer
              la zona de proximidad de las señales de las estaciones y de los pasos a nivel. */
-          const cortes = pasos.filter(p => p.aviso > 0)
-            .reduce((acc, p) => acc.concat([p.pk - p.aviso / 1000, p.pk + p.aviso / 1000]), [])
+          const cortes = pasos
+            .reduce((acc, p) => acc.concat(p.avC > 0 ? [p.pk - p.avC / 1000] : [], p.avD > 0 ? [p.pk + p.avD / 1000] : []), [])
             .filter(x => x > A.pk + 0.02 && x < B.pk - 0.02).sort((x, y) => x - y);
           const bordes = [A.pk].concat(cortes, [B.pk]);
           for(let k = 1; k < bordes.length; k++)
@@ -1988,26 +2095,42 @@ function dzGenerar(){
   });
   /* ===== pasos a nivel (NAS 811 §6.9 · §6.2 · §6.3) ===== */
   if(pasos.length){
-    const entradasDe = est => gen.filter(g => g.tipo === 'Señal de entrada' && g.est === est)
-      .map(g => pkNum(g.pk)).filter(x => isFinite(x));
+    const pkDec = x => String(Math.round(x * 100) / 100).replace('.', ',');
     pasos.forEach(p => {
-      /* §6.9: enclavado si cae entre las señales de entrada de una estación; afectado si son sus
-         pedales de aviso los que llegan a la estación; automático en el resto de casos. */
+      /* §6.9: enclavado si cae entre las señales de entrada de una estación; afectado si su señal
+         de protección o sus pedales de aviso están en la estación o antes; automático el resto. */
       let clase = 'automático', estPN = p.est, detalle = '';
-      Object.keys(grupos).forEach(k => {
-        const e = k === '(trayecto)' ? '' : k, es = entradasDe(e);
-        if(es.length < 2) return;
-        const lo = Math.min(...es), hi = Math.max(...es);
-        if(p.pk >= lo && p.pk <= hi){ clase = 'enclavado'; estPN = estPN || e; detalle = 'está entre las señales de entrada de ' + (e || 'la estación'); }
-        else if(clase === 'automático' && p.aviso > 0 && p.pk - p.aviso / 1000 <= hi && p.pk + p.aviso / 1000 >= lo){
-          clase = 'afectado'; estPN = estPN || e; detalle = 'sus pedales de aviso alcanzan ' + (e || 'la estación');
-        }
-      });
+      if(p._encl){ clase = 'enclavado'; estPN = estPN || p._encl.e; detalle = 'está entre las señales de entrada de ' + (p._encl.e || 'la estación'); }
+      else {
+        const alC = Math.max(p.avC, ...p._spn.filter(s => s.dd === 1).map(s => s.dist));
+        const alD = Math.max(p.avD, ...p._spn.filter(s => s.dd === -1).map(s => s.dist));
+        const r = (alC > 0 || alD > 0) ? rangosEst.find(x => p.pk - alC / 1000 <= x.hi && p.pk + alD / 1000 >= x.lo) : null;
+        if(r){ clase = 'afectado'; estPN = estPN || r.e; detalle = (p._spn.length ? 'su señal o sus pedales alcanzan ' : 'sus pedales de aviso alcanzan ') + (r.e || 'la estación'); }
+      }
       const vs = p.vias.length ? p.vias : [viaGenNum];
       p._clase = clase;
       add('PaN ' + p.nom, 'Paso a nivel', {via:vs[0], est:estPN, pkNum:p.pk,
         criterio:'NAS 811 §6.9: paso a nivel ' + p.tipo + ' — ' + clase + (detalle ? ' (' + detalle + ')' : '')
           + '. Cruza la(s) vía(s) ' + vs.join(', ') + '. En la zona de paso no se establecen señales (§6.2).'});
+      p._spn.forEach(s => {
+        const sentido = s.dd === 1 ? 'PK creciente' : 'PK decreciente';
+        add('SPN ' + p.nom + (s.dd === 1 ? ' C' : ' D') + s.suf, 'Señal de paso a nivel', {via:s.via, est:estPN, pkNum:s.pkS, _dir:s.dd,
+          lado:s.dd === 1 ? 'Lado derecho (abajo)' : 'Lado izquierdo (arriba)', revisar:true,
+          criterio:'NAG 0-8-5.0 Anejo 6 (caso práctico 03): señal de paso a nivel del PN ' + p.nom + ' (' + p.tipo + '), sentido ' + sentido
+            + ', a la distancia de frenado hasta parada, ' + s.dist + ' m (tabla «' + (P.linea || 'Convencional') + '»' + (nagEsRAM(P.linea) ? ' cat. ' + (P.catAM || '0') : '')
+            + ' a ' + s.r.v + ' km/h' + (s.r.v !== s.vIn ? ' (' + s.vIn + ' de ' + s.vFuente + ', al múltiplo de 5 superior)' : ' de ' + s.vFuente)
+            + ' y ' + s.r.decl + '‰: media de ' + pkDec(s.decl) + '‰ entre señal y paso según ' + s.fuente + ', redondeada a la peor como en la herramienta EEN-UTI-350).'
+            + ' La ubicación la regula la ETC de pasos a nivel (apdo. 4.3), que no está en la documentación de la app.'});
+        const dentro = rangosEst.find(x => s.pkS >= x.lo && s.pkS <= x.hi);
+        if(dentro) notas.push('La señal SPN ' + p.nom + (s.dd === 1 ? ' C' : ' D') + s.suf + ' cae entre las señales de entrada de ' + (dentro.e || 'la estación') + ': el paso es afectado (NAS 811 §6.9) y su protección necesita análisis.');
+        if(p.aviso > 0 && p.aviso < s.dist + s.pedalM)
+          notas.push('PN ' + p.nom + ' sentido ' + sentido + ': la distancia de aviso declarada (' + p.aviso + ' m) es menor que la SPN (' + s.dist + ' m) más el aviso de la herramienta EEN-UTI-350 (' + s.pedalM + ' m) = ' + (s.dist + s.pedalM) + ' m.');
+        else if(!p.aviso) add('PEDAL ' + p.nom + (s.dd === 1 ? ' C' : ' D') + s.suf, 'Pedal de paso a nivel',
+          {via:s.via, est:estPN, pkNum:s.pkS - s.dd * s.pedalM / 1000, _dir:s.dd, revisar:true,
+           criterio:'Pedal de aviso del PN ' + p.nom + ' (' + p.tipo + '), sentido ' + sentido + ', a ' + s.pedalM + ' m de su SPN ('
+             + (/SLA/i.test(p.tipo) ? '400 m en SLA' : '18 s × ' + s.vIn + ' km/h + 300 m de visibilidad en SBA') + ') y ' + (s.dist + s.pedalM) + ' m del paso.'
+             + ' Criterio de la herramienta EEN-UTI-350, no de norma: la distancia de aviso la fija la especificación del paso según su tiempo de cierre.'});
+      });
       if(p.aviso > 0) [1, -1].forEach(dd => add('PEDAL ' + p.nom + (dd === 1 ? ' C' : ' D'), 'Pedal de paso a nivel',
         {via:vs[0], est:estPN, pkNum:p.pk - dd * p.aviso / 1000, _dir:dd,
          criterio:'Pedal de aviso del PN ' + p.nom + ' a ' + p.aviso + ' m, sentido ' + (dd === 1 ? 'PK creciente' : 'PK decreciente')
@@ -2034,7 +2157,8 @@ function dzGenerar(){
     });
     /* §6.2 (recomendable): que ningún paso quede dentro de la zona de deslizamiento de una señal */
     const avisosPN = [];
-    gen.filter(g => /^Señal/.test(g.tipo)).forEach(g => {
+    /* la SPN no cuenta: no protege un punto de parada, avisa del propio paso */
+    gen.filter(g => /^Señal/.test(g.tipo) && g.tipo !== 'Señal de paso a nivel').forEach(g => {
       const pk0 = pkNum(g.pk); if(!isFinite(pk0) || avisosPN.length >= 8) return;
       const dd = g._dir || 1;
       const cerca = pasos.find(p => { const m = (p.pk - pk0) * dd * 1000; return m > 0 && m < desliz; });
@@ -2079,7 +2203,10 @@ function dzGenerar(){
     add('BGR ' + g.codigo, 'Baliza', {via:g.via, est:g.est, pkNum:pkN - dd * 0.250, senal:g.codigo,
       criterio:'NAS 840 §2.2.1.13: grupo de balizas de relocalización a 250 m antes de la pantalla virtual ' + g.codigo + ' (sin superar 1.500 m entre grupos enlazados)'});
   });
-  gen.filter(g => /^Señal/.test(g.tipo) && !g.existente).slice().forEach(g => {
+  /* las SPN no llevan aquí grupos de balizas: sus balizas las define la protección del paso */
+  if(gen.some(g => g.tipo === 'Señal de paso a nivel'))
+    notas.push('Señales de paso a nivel (SPN): no se les generan grupos de balizas; sus balizas ASFA/ERTMS dependen del sistema de protección del paso y no están en la documentación de la app.');
+  gen.filter(g => /^Señal/.test(g.tipo) && g.tipo !== 'Señal de paso a nivel' && !g.existente).slice().forEach(g => {
     const pkN = pkNum(g.pk); if(!isFinite(pkN)) return;
     const dd = g._dir || 1;
     const vObjS = vFind(g.est, g.via) || {};
@@ -2333,7 +2460,7 @@ function dzGenerar(){
     ['Señal intermedia', 'intermedias'], ['Señal de PCA', 'PCA'], ['Pantalla ERTMS N2', 'pantallas N2'],
     ['Indicadora de posición de aguja', 'ind. de aguja'], ['Indicadora de salida', 'ind. de salida'],
     ['Circuito de vía', 'CV'], ['Baliza', 'grupos de pie'], ['Baliza infill', 'infill'],
-    ['Paso a nivel', 'pasos a nivel'], ['Pedal de paso a nivel', 'pedales'],
+    ['Paso a nivel', 'pasos a nivel'], ['Señal de paso a nivel', 'señales de PN'], ['Pedal de paso a nivel', 'pedales'],
     ['Cruce bajo vía', 'cruces bajo vía'], ['Arqueta', 'arquetas'], ['Canalización', 'tramos de canalización'], ['Hito de zanja', 'hitos de zanja']]
     .filter(([t]) => cnt(t)).map(([t, l]) => cnt(t) + ' ' + l).join(', ');
   alert('Generados ' + gen.length + ' elementos (' + resumen + ')' +
@@ -2437,6 +2564,7 @@ const CAB_PARES_DEF = [
   {tipo:'Indicadora de salida',             red:'SEN', pares:3},
   {tipo:'Pantalla ERTMS N2',                red:'SEN', pares:5, est:true},
   {tipo:'Paso a nivel',                     red:'SEN', pares:5, est:true},
+  {tipo:'Señal de paso a nivel',            red:'SEN', pares:3, est:true},
   {tipo:'Baliza',                           red:'BAL', pares:2},
   {tipo:'Baliza infill',                    red:'BAL', pares:2},
   {tipo:'Aguja',                            red:'AG',  pares:2},
@@ -3181,7 +3309,7 @@ const DZ_MAPA_SEG = {
   'Indicadora de posición de aguja':['t_senal', 'Indicadora de aguja'],
   'Indicadora de salida':['t_senal', 'Indicadora de salida'], 'Circuito de vía':['t_cdv', null],
   'Baliza':['t_bal', null], 'Baliza infill':['t_bal', null], 'Punto negro':['t_hito', null], 'Topera':['t_hito', null],
-  'Paso a nivel':['t_hito', null], 'Pedal de paso a nivel':['t_hito', null],
+  'Paso a nivel':['t_hito', null], 'Pedal de paso a nivel':['t_hito', null], 'Señal de paso a nivel':['t_senal', 'Paso a nivel'],
   'Arqueta':['t_arq', null], 'Canalización':['t_canal', null],
   'Cruce bajo vía':['t_canal', null, {f_tcanal:'Cruce bajo vía', f_lado:'Cruce bajo vía'}],
   'Hito de zanja':['t_hito', null]
@@ -3382,7 +3510,7 @@ function viewGenerar(){
         : null);
   const card = el('div', {class:'card', style:'margin-top:16px'});
   card.appendChild(el('div', {class:'card-b'},
-    el('p', null, 'Genera retrocesos, salidas, indicadoras de posición de aguja, señales de entrada/avanzada/preavanzada, señales de trayecto o de PCA según el tipo de bloqueo, circuitos de vía (de estación y de trayecto), balizas de pie (BGS) e infill (BGI), pasos a nivel y puntos negros a partir de las agujas, los piquetes y los parámetros. Si lo pides en Parámetros, genera además la canalización de cables. Cada elemento lleva su PK calculado y el criterio NAS 811 / NAS 818 / NAS 840 / NAG 0-8-5.0 / NAG 0-3-1.0 aplicado.'),
+    el('p', null, 'Genera retrocesos, salidas, indicadoras de posición de aguja, señales de entrada/avanzada/preavanzada, señales de trayecto o de PCA según el tipo de bloqueo, circuitos de vía (de estación y de trayecto), balizas de pie (BGS) e infill (BGI), pasos a nivel (con sus señales SPN y pedales si son SLA o SBA) y puntos negros a partir de las agujas, los piquetes y los parámetros. Si lo pides en Parámetros, genera además la canalización de cables. Cada elemento lleva su PK calculado y el criterio NAS 811 / NAS 818 / NAS 840 / NAG 0-8-5.0 / NAG 0-3-1.0 aplicado.'),
     falta.length ? el('p', {style:'color:var(--amb)'}, 'Faltan datos: ' + falta.join(', ') + '.') : null,
     el('p', {style:'color:var(--tx2);font-size:12px'}, 'Distancia de frenado: ' + (frSrc || 'sin dato para esta red → valor provisional 1000 m (revisar)') + '. Rebase indebido (§6.11): ' + (nagEsRAM(P.linea) ? 'tabla RAM' : 'tabla CONV/AV') + ' de la NAG 0-8-5.0 §5.'),
     el('button', {class:'btn red', ...(falta.length ? {disabled:'disabled'} : {}), onclick:dzGenerar}, 'Generar señalización')));
@@ -3503,8 +3631,8 @@ function viewEsquemaDiseno(){
   const genNum = (vv.find(v => v.general) || vv.find(v => v.num === '1') || vv[0] || {num:'1'}).num;
   /* filtro: chips para mostrar/ocultar tipos de elemento */
   const colG = t => /Paso a nivel|Pedal/.test(t) ? '#d4a017' : /Pantalla/.test(t) ? '#3fb6c8' : /^Señal/.test(t) ? '#e23744' : /Circuito/.test(t) ? '#33c07d' : /Baliza/.test(t) ? '#8a6cd6' : /Punto negro/.test(t) ? '#e0a13c' : /Topera/.test(t) ? '#c46b52' : /Arqueta/.test(t) ? '#b07cd6' : /Canalización|Cruce bajo/.test(t) ? '#c9962b' : /Hito/.test(t) ? '#7f8c99' : '#9db0c0';
-  const LBL = {'Señal de entrada':'S. entrada', 'Señal de salida':'S. salida', 'Señal avanzada':'S. avanzada', 'Señal preavanzada':'S. preavanzada', 'Señal de retroceso':'S. retroceso', 'Señal de liberación':'S. liberación', 'Señal intermedia':'S. intermedia', 'Señal de PCA':'PCA', 'Pantalla ERTMS N2':'Pantalla N2', 'Indicadora de posición de aguja':'Ind. aguja', 'Indicadora de salida':'Ind. salida', 'Circuito de vía':'CV', 'Baliza':'Baliza pie', 'Baliza infill':'Baliza infill', 'Punto negro':'Punto negro', 'Topera':'Topera', 'Paso a nivel':'Paso a nivel', 'Pedal de paso a nivel':'Pedal PN', 'Arqueta':'Arqueta', 'Canalización':'Canalización', 'Cruce bajo vía':'Cruce bajo vía', 'Hito de zanja':'Hito zanja'};
-  const ORD = ['Señal de entrada', 'Señal avanzada', 'Señal preavanzada', 'Señal de salida', 'Señal de retroceso', 'Señal de liberación', 'Señal intermedia', 'Señal de PCA', 'Pantalla ERTMS N2', 'Indicadora de posición de aguja', 'Indicadora de salida', 'Circuito de vía', 'Baliza', 'Baliza infill', 'Punto negro', 'Topera', 'Paso a nivel', 'Pedal de paso a nivel', 'Cruce bajo vía', 'Arqueta', 'Canalización', 'Hito de zanja'];
+  const LBL = {'Señal de entrada':'S. entrada', 'Señal de salida':'S. salida', 'Señal avanzada':'S. avanzada', 'Señal preavanzada':'S. preavanzada', 'Señal de retroceso':'S. retroceso', 'Señal de liberación':'S. liberación', 'Señal intermedia':'S. intermedia', 'Señal de PCA':'PCA', 'Pantalla ERTMS N2':'Pantalla N2', 'Indicadora de posición de aguja':'Ind. aguja', 'Indicadora de salida':'Ind. salida', 'Circuito de vía':'CV', 'Baliza':'Baliza pie', 'Baliza infill':'Baliza infill', 'Punto negro':'Punto negro', 'Topera':'Topera', 'Paso a nivel':'Paso a nivel', 'Señal de paso a nivel':'SPN', 'Pedal de paso a nivel':'Pedal PN', 'Arqueta':'Arqueta', 'Canalización':'Canalización', 'Cruce bajo vía':'Cruce bajo vía', 'Hito de zanja':'Hito zanja'};
+  const ORD = ['Señal de entrada', 'Señal avanzada', 'Señal preavanzada', 'Señal de salida', 'Señal de retroceso', 'Señal de liberación', 'Señal intermedia', 'Señal de PCA', 'Pantalla ERTMS N2', 'Indicadora de posición de aguja', 'Indicadora de salida', 'Circuito de vía', 'Baliza', 'Baliza infill', 'Punto negro', 'Topera', 'Paso a nivel', 'Señal de paso a nivel', 'Pedal de paso a nivel', 'Cruce bajo vía', 'Arqueta', 'Canalización', 'Hito de zanja'];
   const tiposGen = [...new Set((d.generados || []).map(g => g.tipo))].sort((a, b) => (ORD.indexOf(a) + 1 || 99) - (ORD.indexOf(b) + 1 || 99));
   const chip = (key, label, color) => {
     const off = dzEsqFiltro.has(key);
