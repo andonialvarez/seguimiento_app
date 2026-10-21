@@ -70,20 +70,24 @@ function nagCurvaFrenado(linea, cat, decl){
   const T = NAG_DFP[nagRedKey(linea, cat)]; if(!T) return [];
   const anyRow = T['0'] || T[Object.keys(T)[0]] || '';
   const vMax = 30 + (('' + anyRow).split(',').length - 1) * 5, out = [];
-  for(let v = 30; v <= vMax; v += 10){ const d = nagDistParada(linea, cat, decl, v); if(d != null) out.push({vel:String(v), dist:String(d)}); }
+  for(let v = 30; v <= vMax; v += 10){
+    const s = nagDistParadaSegura(linea, cat, decl, v), d = s ? s.m : nagDistParada(linea, cat, decl, v);
+    if(d != null) out.push({vel:String(v), dist:String(d)});
+  }
   return out;
 }
-/* distancia de frenado de Vi hasta 160 km/h (m); null si no hay dato. Para señales preavanzadas. */
+/* distancia de frenado de Vi hasta 160 km/h (m); null si no hay dato. Para señales preavanzadas.
+   Redondeo del lado seguro, como nagDistParadaSegura: declividad hacia abajo, Vi hacia arriba. */
 function nagDistA160(linea, cat, decl, vi){
-  if(!(vi > 160) || vi > 202) return null;   /* la tabla sólo cubre Vi = 165…200 km/h */
+  if(!(vi > 160) || vi > 200) return null;   /* la tabla sólo cubre Vi = 165…200 km/h */
   const T = NAG_DF160[nagRedKey(linea, cat)]; if(!T) return null;
-  const dR = Math.max(-35, Math.min(35, Math.round(decl || 0)));
+  const dR = Math.max(-35, Math.min(35, Math.floor((decl || 0) + 1e-9)));
   let row = T[dR];
   if(row == null) for(let dd = dR - 1; dd >= -35; dd--){ if(T[dd] != null){ row = T[dd]; break; } }
   if(row == null) for(let dd = dR + 1; dd <= 35; dd++){ if(T[dd] != null){ row = T[dd]; break; } }
   if(row == null) return null;
   const arr = ('' + row).split(',');
-  const vq = Math.max(165, Math.min(200, Math.round((vi || 0) / 5) * 5));
+  const vq = Math.max(165, Math.min(200, Math.ceil((vi || 0) / 5 - 1e-9) * 5));
   const val = arr[(vq - 165) / 5];
   return (val === '' || val == null) ? null : +val;
 }
@@ -1410,13 +1414,18 @@ function dzGenerar(){
   const sis = P.sistemas || 'ASFA';
   const dfr = (P.distFrenado || []).map(r => ({v:parseFloat(String(r.vel).replace(',', '.')), m:parseFloat(String(r.dist).replace(',', '.'))}))
     .filter(r => isFinite(r.v) && isFinite(r.m)).sort((a, b) => a.v - b.v);
-  /* distancia de frenado: override manual si el usuario rellenó la tabla; si no, NAG 0-8-5.0; si no, null */
+  /* distancia de frenado: override manual si el usuario rellenó la tabla; si no, NAG 0-8-5.0 con
+     redondeo del lado seguro (declividad hacia la peor, velocidad al múltiplo de 5 superior). Si
+     la declividad o la velocidad se salen de la tabla se toma la fila o columna más desfavorable
+     que haya, que se queda corta, y se marca «fuera». Sin dato, null. */
   const frenado = v => {
     if(dfr.length){ const h = dfr.find(r => r.v >= v); return {m:(h ? h.m : dfr[dfr.length - 1].m), src:'tabla manual'}; }
+    const s = nagDistParadaSegura(P.linea, P.catAM, grad, v);
+    if(s) return {m:s.m, src:'NAG 0-8-5.0', v:s.v, decl:s.decl};
     const n = nagDistParada(P.linea, P.catAM, grad, v);
-    return n != null ? {m:n, src:'NAG 0-8-5.0'} : null;
+    return n != null ? {m:n, src:'NAG 0-8-5.0, fuera de tabla', fuera:true} : null;
   };
-  let usoFrenadoNAG = false, usoFrenadoProv = false, usoPreavProv = false;
+  let usoFrenadoNAG = false, usoFrenadoProv = false, usoPreavProv = false, usoFrenadoFuera = false;
   const tieneASFA = /ASFA/i.test(sis), esN2 = /N2/i.test(sis), esN1 = /N1/i.test(sis);
   /* NAS 840 §2.2.1.1.3: los 9 m son de la ÚLTIMA baliza del grupo ERTMS, que se retira porque la
      baliza ASFA se intercala a 5 m. Sin ERTMS instalado la única baliza al pie es la ASFA, a 5 m
@@ -1739,7 +1748,8 @@ function dzGenerar(){
       criterio:'NAS 811 §6.2 + §6.10: entrada' + donde + ' por la vía ' + a.vo + ' a distancia de deslizamiento (' + desliz + ' m) de ' + ref.q + (sinEntraPor ? ' — sentido asumido por PK' : ''),
       revisar:sinEntraPor});
     const fr = frenado(vmax);
-    if(fr && fr.src === 'NAG 0-8-5.0') usoFrenadoNAG = true;
+    if(fr && /^NAG/.test(fr.src)) usoFrenadoNAG = true;
+    if(fr && fr.fuera) usoFrenadoFuera = true;
     if(!fr) usoFrenadoProv = true;
     const pkA = pkE - dir * ((fr ? fr.m : 1000)) / 1000;
     /* NAS 811 §6.2: «en el caso de señales de entrada muy próximas a las señales de salida de la
@@ -1756,9 +1766,11 @@ function dzGenerar(){
         + (fr ? fr.m : 1000) + ' m) caería en ' + dondeEst + '. La NAS 811 §6.2 permite que no exista cuando la entrada está muy próxima a la estación colateral.');
     } else {
       add("E'" + num, 'Señal avanzada', {via:a.vo, est:a.est, pkNum:pkA, _dir:dir, lado:dir === 1 ? 'Lado derecho (abajo)' : 'Lado izquierdo (arriba)',
-        criterio:fr ? ('NAS 811 §6.2: avanzada de E' + num + ' a distancia de frenado (' + fr.m + ' m) para ' + vmax + ' km/h en declividad ' + (grad || 0) + '‰ — ' + fr.src)
+        criterio:fr ? ('NAS 811 §6.2: avanzada de E' + num + ' a distancia de frenado (' + fr.m + ' m) para ' + vmax + ' km/h' + (fr.v && fr.v !== vmax ? ' (' + fr.v + ' en tabla)' : '')
+                        + ' en declividad ' + (grad || 0) + '‰' + (fr.decl != null && fr.decl !== grad ? ' (' + fr.decl + '‰ en tabla)' : '') + ' — ' + fr.src
+                        + (fr.v != null ? ', redondeo del lado seguro' : ''))
                     : 'NAS 811 §6.2: avanzada de E' + num + ' a distancia de frenado — sin dato NAG ni tabla manual; valor provisional 1000 m',
-        revisar:!fr || sinEntraPor});
+        revisar:!fr || !!fr.fuera || sinEntraPor});
       /* NAS 811 §6.2: preavanzada en BLA con señalización lateral por encima de 160 km/h y ASFA
          convencional, a la distancia que permita reducir de vmax a 160 km/h (NAG 0-8-5.0, Vi→160). */
       if(bloq === 'BLA' && tieneASFA && vmax > 160){
@@ -2447,7 +2459,8 @@ function dzGenerar(){
       + '. Suele ser que el PK inicio/fin de esa vía se ha tomado de piquete a piquete y la punta de la aguja queda algo fuera; comprueba la tabla de Vías.');
   }
   gen.forEach(g => { delete g._dir; });
-  if(usoFrenadoNAG) notas.push('Distancia de frenado de las avanzadas: tomada de la NAG 0-8-5.0 (ED1+M1+M2) para «' + (P.linea || 'Convencional') + '»' + (nagEsRAM(P.linea) ? ' cat. ' + (P.catAM || '0') : '') + ' y declividad ' + (grad || 0) + '‰.');
+  if(usoFrenadoNAG) notas.push('Distancia de frenado de las avanzadas: tomada de la NAG 0-8-5.0 (ED1+M1+M2) para «' + (P.linea || 'Convencional') + '»' + (nagEsRAM(P.linea) ? ' cat. ' + (P.catAM || '0') : '') + ' y declividad ' + (grad || 0) + '‰, con la declividad redondeada hacia la peor y la velocidad al múltiplo de 5 superior.');
+  if(usoFrenadoFuera) notas.push('La declividad (' + (grad || 0) + '‰) o la velocidad se salen de la tabla de frenado de la NAG 0-8-5.0: se ha usado la fila o columna más desfavorable que hay, que se queda corta. Las avanzadas afectadas van marcadas «revisar».');
   if(usoFrenadoProv) notas.push('Alguna avanzada usa un valor provisional de 1000 m (sin dato NAG ni tabla manual para esa red/velocidad).');
   const nrev = gen.filter(g => g.revisar).length;
   d.generados = gen;
