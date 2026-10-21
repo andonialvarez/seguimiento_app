@@ -375,7 +375,7 @@ let ghDirty = false, ghStatus = 'off', ghBusy = false, ghPushTimer = null;
 function ghDevice(){ let d = localStorage.getItem('vs-gh-dev'); if(!d){ d = Math.random().toString(36).slice(2, 7); localStorage.setItem('vs-gh-dev', d); } return d; }
 function setGhStatus(s){ ghStatus = s; const tr = document.getElementById('topright'); if(tr) renderTopRight(); }
 function b64EncUtf8(str){ return btoa(unescape(encodeURIComponent(str))); }
-function b64DecUtf8(b64){ return decodeURIComponent(escape(atob(String(b64).replace(/\s/g, '')))); }
+function b64DecUtf8(b64){ const bin = atob(String(b64).replace(/\s/g, '')), u = new Uint8Array(bin.length); for(let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return new TextDecoder().decode(u); }
 function fotoId(s){ let h = 5381; for(let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; return h.toString(36) + s.length.toString(36); }
 function walkStrings(obj, fn){
   if(Array.isArray(obj)){ for(let i = 0; i < obj.length; i++){ const v = obj[i]; if(typeof v === 'string') obj[i] = fn(v); else if(v && typeof v === 'object') walkStrings(v, fn); } }
@@ -387,18 +387,29 @@ async function ghApi(path, opts){
     headers: { 'Authorization': 'Bearer ' + GH.token, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
   }, opts || {}));
 }
+/* contenido en base64 de una respuesta de /contents. Por encima de 1 MB GitHub NO lo incluye
+   (content vacío, encoding "none"): entonces se pide el blob por su sha, que llega hasta 100 MB */
+async function ghContenidoB64(j){
+  if(j.content && j.encoding === 'base64') return j.content;
+  const r = await ghApi('/git/blobs/' + j.sha);
+  if(!r.ok) throw new Error('GitHub ' + r.status + ' ' + (await r.text()).slice(0, 160));
+  const b = await r.json();
+  return b.content || '';
+}
 async function ghGetJson(){
   const r = await ghApi('/contents/proyecto.json?ref=' + encodeURIComponent(GH.branch) + '&t=' + Date.now());
   if(r.status === 404) return { missing: true };
   if(!r.ok) throw new Error('GitHub ' + r.status + ' ' + (await r.text()).slice(0, 160));
   const j = await r.json();
-  return { data: JSON.parse(b64DecUtf8(j.content)), sha: j.sha };
+  const txt = b64DecUtf8(await ghContenidoB64(j));
+  if(!txt.trim()) throw new Error('proyecto.json ha llegado vacío (' + (j.size || 0) + ' bytes en GitHub)');
+  return { data: JSON.parse(txt), sha: j.sha };
 }
 async function ghFetchFoto(id){
   const r = await ghApi('/contents/fotos/' + id + '.jpg?ref=' + encodeURIComponent(GH.branch));
   if(!r.ok) return null;
   const j = await r.json();
-  return 'data:image/jpeg;base64,' + String(j.content).replace(/\s/g, '');
+  return 'data:image/jpeg;base64,' + String(await ghContenidoB64(j)).replace(/\s/g, '');
 }
 async function ghRehidratarFotos(obj){
   const ids = new Set();
