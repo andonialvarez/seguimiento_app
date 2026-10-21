@@ -3453,7 +3453,7 @@ function viewEsquemaDiseno(){
   const viewW = (document.getElementById('view') || {}).clientWidth || 1100;
   const PXMIN = 30, PXMAX = 24000;   /* px/km; división mínima de 25 m bien separada */
   const fitPx = Math.max(PXMIN, Math.min(6000, (viewW - pad * 2 - 24) / span));
-  const pxKm = Math.max(PXMIN, Math.min(PXMAX, dzEsqZoom || fitPx));
+  const pxKm = Math.max(PXMIN, Math.min(PXMAX, 2e6 / span, dzEsqZoom || fitPx));   /* tope de 2 millones de px de ancho */
   const plotW = Math.round(span * pxKm), W = plotW + pad * 2;
   const X = pk => pad + (pk - mn) * pxKm;
   /* rejilla de PK adaptativa; el paso más fino son 25 m */
@@ -4709,7 +4709,7 @@ function esqZoomBtn(f){
     const cx = box.clientWidth / 2;
     esqWheelPend = {pkU:esqCtx.mn + (box.scrollLeft + cx - esqCtx.mL) / esqCtx.pxKm, cx, top:box.scrollTop};
   }
-  esqZoom = Math.max(20, Math.min(20000, (esqZoom || esqFit || 100) * f));
+  esqZoom = Math.max(20, Math.min(20000, (esqCtx.pxKm || esqZoom || esqFit || 100) * f));
   render();
 }
 let _rrRAF = 0, _rlT = 0;
@@ -5778,6 +5778,22 @@ function importarSimbolos(){
   render();
 }
 
+/* rango de PK «principal»: se parte la lista por los huecos de más de 50 km y se queda el grupo
+   con más PKs. Un PK tecleado en metros (18384,5 en vez de 18,384) o con un dígito de más queda
+   fuera y ya no estira el esquema a miles de km vacíos. */
+const ESQ_HUECO_KM = 50;
+function pkRangoPrincipal(vals){
+  const v = vals.filter(x => isFinite(x)).sort((a, b) => a - b);
+  if(!v.length) return null;
+  let best = null, ini = 0;
+  for(let i = 1; i <= v.length; i++){
+    if(i === v.length || v[i] - v[i - 1] > ESQ_HUECO_KM){
+      if(!best || i - ini > best.n) best = {mn:v[ini], mx:v[i - 1], n:i - ini};
+      ini = i;
+    }
+  }
+  return best;
+}
 function esquemaCanvas(conPk, sinPk, elsAll){
   const lugares = proyActivo().lugares || [];
   const lugarSel = esqLugar ? lugares.find(l => l.id === esqLugar) : null;
@@ -5789,16 +5805,27 @@ function esquemaCanvas(conPk, sinPk, elsAll){
   if(lugarSel) paraExtent = paraExtent.filter(d => [d.p.ini, d.p.fin, d.p.pu]
     .some(v => !isNaN(v) && v >= lugarSel.pkIni - 0.2 && v <= lugarSel.pkFin + 0.2));
   let mn, mx;
+  /* elementos con un PK fuera del tramo principal: no se dibujan ni estiran el esquema; se listan
+     debajo para corregirlos */
+  const fuera = [];
   if(lugarSel){ mn = lugarSel.pkIni; mx = lugarSel.pkFin; }
   else {
+    /* la extensión la marcan los ELEMENTOS: una vía declarada 0–200 no debe sacar 180 km de PKs vacíos.
+       Las vías solo cuentan si todavía no hay ningún elemento con PK */
     const pks = [];
-    paraExtent.forEach(d => [d.p.ini, d.p.fin, d.p.pu].forEach(v => { if(!isNaN(v)) pks.push(v); }));
-    viasDef.forEach(v => { pks.push(v.pkIni, v.pkFin); });
-    if(!pks.length){ pks.push(0, 1); }
-    mn = Math.min(...pks); mx = Math.max(...pks);
+    paraExtent.forEach(d => [d.p.ini, d.p.fin, d.p.pu].forEach(v => { if(isFinite(v)) pks.push(v); }));
+    if(!pks.length) viasDef.forEach(v => { [v.pkIni, v.pkFin].forEach(k => { if(k != null && k !== '' && isFinite(k)) pks.push(+k); }); });
+    const r = pkRangoPrincipal(pks) || {mn:0, mx:1};
+    mn = r.mn; mx = r.mx;
+    (elsAll || []).forEach(e => {
+      const q = elemPK(e);
+      if([q.ini, q.fin, q.pu].some(v => isFinite(v) && (v < mn - 1e-9 || v > mx + 1e-9))) fuera.push(e);
+    });
   }
   if(mn === mx) mx = mn + 0.4;
-  const pad = (mx - mn) * 0.06 + 0.03; mn -= pad; mx += pad;
+  /* margen pequeño a los lados, y sin PK negativos si ningún elemento los tiene */
+  const pad = (mx - mn) * 0.03 + 0.02, mn0 = mn; mn -= pad; mx += pad;
+  if(mn0 >= 0 && mn < 0) mn = 0;
 
   const esMain = v => !v || v === '—' || /^1(\D|$)/.test(String(v).trim());
   const esPar = v => /^\d+$/.test(String(v).trim()) && (+v % 2 === 0);
@@ -5815,7 +5842,8 @@ function esquemaCanvas(conPk, sinPk, elsAll){
   const dispo = Math.max(700, ((document.getElementById('view') || {}).clientWidth || 1120) - 4);
   const fit = Math.max(30, (dispo - mL - mR) / (mx - mn));
   esqFit = fit;
-  const pxKm = Math.max(20, Math.min(20000, esqZoom || fit));
+  /* tope de ancho (2 millones de px): más allá el navegador se arrastra y no aporta detalle */
+  const pxKm = Math.max(20, Math.min(20000, 2e6 / (mx - mn), esqZoom || fit));
   const W = Math.round(mL + mR + (mx - mn) * pxKm);
   const X = pk => mL + (pk - mn) * pxKm;
   const gap = 60;
@@ -5829,7 +5857,8 @@ function esquemaCanvas(conPk, sinPk, elsAll){
   const lanesY = [{via:'', y:baseY}].concat(secs.map(v => ({via:v, y:yFor(v)})));
   esqCtx = {mn, mx, pxKm, mL, baseY, lanesY};
 
-  const vis = conPk;   /* ya viene filtrado por pasaFiltros desde viewEsquema */
+  const fueraIds = new Set(fuera.map(e => e.id));
+  const vis = fueraIds.size ? conPk.filter(d => !fueraIds.has(d.e.id)) : conPk;   /* ya viene filtrado por pasaFiltros desde viewEsquema */
   const esLineal = d => !isNaN(d.p.ini) && !isNaN(d.p.fin);
   const tri = (x, y) => '<path d="M' + (x - 4) + ' ' + (y - 6) + ' L' + (x + 4) + ' ' + (y - 6) + ' L' + x + ' ' + (y + 1) + ' Z" fill="#8794a1"/>';
   const ttl = e => { const h = hoverEsq(e); return h ? '<title>' + esc(h) + '</title>' : ''; };
@@ -6076,7 +6105,7 @@ function esquemaCanvas(conPk, sinPk, elsAll){
     const r = box.getBoundingClientRect();
     const cx = ev.clientX - r.left;
     const pkU = esqCtx.mn + (box.scrollLeft + cx - esqCtx.mL) / esqCtx.pxKm;
-    esqZoom = Math.max(20, Math.min(20000, (esqZoom || esqFit) * (ev.deltaY < 0 ? 1.2 : 1 / 1.2)));
+    esqZoom = Math.max(20, Math.min(20000, (esqCtx.pxKm || esqZoom || esqFit) * (ev.deltaY < 0 ? 1.2 : 1 / 1.2)));
     esqWheelPend = {pkU, cx};
     reRenderPronto();
   }, {passive:false});
@@ -6104,7 +6133,7 @@ function esquemaCanvas(conPk, sinPk, elsAll){
     if(ev.touches.length === 2){
       const [a, b] = ev.touches;
       const r = box.getBoundingClientRect(), cx = (a.clientX + b.clientX) / 2 - r.left;
-      pinch = {d:Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), z:esqZoom || esqFit || 100,
+      pinch = {d:Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), z:esqCtx.pxKm || esqZoom || esqFit || 100,
                cx, pkU:esqCtx.mn + (box.scrollLeft + cx - esqCtx.mL) / esqCtx.pxKm};
     }
   }, {passive:true});
@@ -6238,7 +6267,15 @@ function esquemaCanvas(conPk, sinPk, elsAll){
     document.addEventListener('mouseup', up);
   });
   /* barra de desplazamiento y regla de PK arriba, el esquema debajo */
-  return el('div', null, esqCabecera(box, W, regla, true), box);
+  const wrap = el('div', null, esqCabecera(box, W, regla, true), box);
+  if(fuera.length){
+    const ch = el('div', {class:'chips'});
+    ch.appendChild(el('span', {style:'color:var(--amb);font-size:12px'}, 'PK fuera del tramo, no se dibujan (¿metros en vez de km?) · clic para corregir:'));
+    fuera.forEach(e => { const q = elemPK(e), k = [q.pu, q.ini, q.fin].find(v => isFinite(v) && (v < mn0 || v > mx - pad));
+      ch.appendChild(el('span', {class:'chip', onclick:() => nuevoElemento(e.id)}, (e.codigo || (getTipo(e.tipoId) || {}).nombre || 'elemento') + (isFinite(k) ? ' · PK ' + toPkStr(k) : ''))); });
+    wrap.appendChild(ch);
+  }
+  return wrap;
 }
 
 /* ================= vista: Modelo de datos ================= */
