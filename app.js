@@ -311,6 +311,7 @@ function migrar(){
     if(!Array.isArray(p.replanteos)) p.replanteos = [];
     p.lugares.forEach(l => { if(!l.tipo) l.tipo = tipoLugarDefecto(l.nombre); });
     if(!Array.isArray(p.documentos)) p.documentos = [];
+    if(!Array.isArray(p.carpetasDoc)) p.carpetasDoc = [];
     if(p.modo !== 'diseno' && p.modo !== 'seguimiento') p.modo = 'seguimiento';
     if(!p.diseno || typeof p.diseno !== 'object') p.diseno = {};
     ['vias','agujas','piquetes','estaciones','pasos','perfil','existentes','generados'].forEach(k => { if(!Array.isArray(p.diseno[k])) p.diseno[k] = []; });
@@ -7393,6 +7394,179 @@ const docsDe = e => docsProy(state.proyectos.find(p => p.id === e.proyectoId)).f
 const docElems = d => Object.keys(d.elementos || {}).map(id => state.elementos.find(e => e.id === id && !e.borrado)).filter(Boolean);
 const fmtTam = b => b >= 1048576 ? fmtNum(b / 1048576) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
 const docRuta = a => 'documentos/' + a.hash + (a.ext ? '.' + a.ext : '');
+const docFecha = d => d.fecha ? new Date(d.fecha + 'T12:00:00').toLocaleDateString('es-ES') : '';
+/* --- carpetas y subcarpetas --- */
+/* Solo ordenan la lista: p.carpetasDoc = [{id, nombre, padre}] y d.carpeta = id (vacío, o una
+   carpeta que ya no existe, es la raíz). El archivo sigue en documentos/<hash> del repositorio, así
+   que crear, renombrar o mover carpetas no sube nada más que proyecto.json. */
+let docCarpeta = '', docConSub = false;
+const docMarcados = new Set();
+const carpetasProy = pr => ((pr || proyActivo()).carpetasDoc || []);
+const carpetaDe = (pr, id) => (id && carpetasProy(pr).find(c => c.id === id)) || null;
+const padreDe = (pr, c) => carpetaDe(pr, c.padre) ? c.padre : '';
+const docEnCarpeta = (pr, d) => carpetaDe(pr, d.carpeta) ? d.carpeta : '';
+function carpetaHijas(pr, padre){
+  return carpetasProy(pr).filter(c => padreDe(pr, c) === (padre || '')).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es', {numeric:true}));
+}
+function carpetaRuta(pr, id){ const out = []; for(let c = carpetaDe(pr, id), n = 0; c && n < 50; c = carpetaDe(pr, c.padre), n++) out.unshift(c); return out; }
+const carpetaTxt = (pr, id) => carpetaRuta(pr, id).map(c => c.nombre).join(' / ') || 'Documentos';
+/* la carpeta y todas las que cuelgan de ella ('' = todo el proyecto) */
+function carpetaRama(pr, id){
+  const out = new Set([id || '']);
+  for(let mas = true; mas;){ mas = false; carpetasProy(pr).forEach(c => { if(!out.has(c.id) && out.has(padreDe(pr, c))){ out.add(c.id); mas = true; } }); }
+  return out;
+}
+/* <option> de todas las carpetas, sangradas como el árbol. `sin`: las que no se pueden elegir
+   (al mover una carpeta, ella misma y lo que cuelga de ella) */
+function carpetaOpciones(pr, val, sin){
+  const out = [el('option', {value:'', ...(val === '' ? {selected:'selected'} : {})}, 'Documentos (raíz)')];
+  const rec = (padre, niv) => { if(niv > 50) return; carpetaHijas(pr, padre).forEach(c => {
+    if(sin && sin.has(c.id)) return;
+    out.push(el('option', {value:c.id, ...(c.id === val ? {selected:'selected'} : {})}, '   '.repeat(niv) + c.nombre));
+    rec(c.id, niv + 1);
+  }); };
+  rec('', 1);
+  return out;
+}
+/* los documentos de un desplegable, agrupados por carpeta si hay más de una */
+function docOpciones(pr, docs){
+  const txt = d => d.nombre + ' · ' + (d.tipo || '') + (d.fecha ? ' · ' + docFecha(d) : '');
+  const grupos = new Map();
+  docs.forEach(d => { const k = docEnCarpeta(pr, d); if(!grupos.has(k)) grupos.set(k, []); grupos.get(k).push(d); });
+  if(grupos.size === 1 && grupos.has('')) return docs.map(d => el('option', {value:d.id}, txt(d)));
+  return [...grupos.keys()].sort((a, b) => (a ? carpetaTxt(pr, a) : '').localeCompare(b ? carpetaTxt(pr, b) : '', 'es', {numeric:true}))
+    .map(k => el('optgroup', {label:k ? carpetaTxt(pr, k) : 'Sin carpeta'}, ...grupos.get(k).map(d => el('option', {value:d.id}, txt(d)))));
+}
+const nombreCarpetaLibre = (pr, padre, n, salvo) => !carpetaHijas(pr, padre).some(c => c !== salvo && c.nombre.toLowerCase() === n.toLowerCase());
+const icoCarpeta = () => el('span', {class:'icarp', html:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/></svg>'});
+/* crear (c = null, dentro de `padre`) o renombrar / mover / borrar una carpeta */
+function carpetaFormulario(c, padre){
+  if(soloLectura()) return;
+  const pr = proyActivo();
+  const rama = c ? carpetaRama(pr, c.id) : null;
+  const iNom = el('input', {value:c ? c.nombre : '', placeholder:'Pruebas de tarjetas'});
+  const iPadre = el('select', null, ...carpetaOpciones(pr, c ? padreDe(pr, c) : (carpetaDe(pr, padre) ? padre : ''), rama));
+  const nDocs = c ? docsProy(pr).filter(d => rama.has(docEnCarpeta(pr, d))).length : 0;
+  openModal(c ? 'Carpeta «' + c.nombre + '»' : 'Carpeta nueva',
+    el('div', null,
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Nombre'), iNom),
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Dentro de'), iPadre),
+      c ? el('p', {class:'hint'}, nDocs ? 'Tiene ' + nDocs + ' documento' + (nDocs === 1 ? '' : 's') + ' contando sus subcarpetas. Si la borras, su contenido pasa a la carpeta de arriba: no se borra ningún documento.' : 'Está vacía.') : null),
+    () => {
+      const n = iNom.value.trim(), p = iPadre.value;
+      if(!n){ alert('Pon un nombre.'); return false; }
+      if(/[\/\\]/.test(n)){ alert('El nombre no puede llevar «/» ni «\\».'); return false; }
+      if(!nombreCarpetaLibre(pr, p, n, c)){ alert('Ya hay una carpeta «' + n + '» en «' + carpetaTxt(pr, p) + '».'); return false; }
+      if(c){
+        if(c.nombre === n && padreDe(pr, c) === p) return;
+        const antes = carpetaTxt(pr, c.id);
+        c.nombre = n; c.padre = p;
+        registrarCambio('documento', 'Carpeta «' + antes + '» → «' + carpetaTxt(pr, c.id) + '»');
+      } else {
+        const nc = {id:uid(), nombre:n, padre:p};
+        pr.carpetasDoc = carpetasProy(pr).concat(nc);
+        registrarCambio('documento', 'Carpeta nueva «' + carpetaTxt(pr, nc.id) + '»');
+      }
+      save(); render();
+    },
+    c ? () => carpetaBorrar(c) : null);
+  setTimeout(() => iNom.focus(), 30);
+}
+/* borrar una carpeta: sus documentos y subcarpetas suben a la carpeta de arriba */
+function carpetaBorrar(c){
+  const pr = proyActivo(), padre = padreDe(pr, c);
+  const docs = docsProy(pr).filter(d => docEnCarpeta(pr, d) === c.id), subs = carpetaHijas(pr, c.id);
+  const dest = carpetaTxt(pr, padre), ruta = carpetaTxt(pr, c.id);
+  const que = [docs.length ? docs.length + ' documento' + (docs.length === 1 ? '' : 's') : '', subs.length ? subs.length + ' subcarpeta' + (subs.length === 1 ? '' : 's') : ''].filter(Boolean).join(' y ');
+  if(!confirm('¿Borrar la carpeta «' + ruta + '»?' + (que ? ' Lo que tiene (' + que + ') pasa a «' + dest + '». No se borra ningún documento.' : ''))) return false;
+  docs.forEach(d => { d.carpeta = padre; });
+  subs.forEach(s => {
+    s.padre = padre;
+    /* si arriba ya hay una carpeta con ese nombre, se le añade un número */
+    if(!nombreCarpetaLibre(pr, padre, s.nombre, s)){ const base = s.nombre; let i = 2; while(!nombreCarpetaLibre(pr, padre, base + ' (' + i + ')', s)) i++; s.nombre = base + ' (' + i + ')'; }
+  });
+  pr.carpetasDoc = carpetasProy(pr).filter(x => x !== c);
+  if(docCarpeta === c.id) docCarpeta = padre;
+  registrarCambio('documento', 'Carpeta borrada «' + ruta + '»' + (que ? '; lo que tenía (' + que + ') pasa a «' + dest + '»' : ''));
+  save(); render();
+}
+function docMover(ids, destino){
+  if(soloLectura()) return 0;
+  const pr = proyActivo(), dest = carpetaDe(pr, destino) ? destino : '';
+  const ds = docsProy(pr).filter(d => ids.includes(d.id) && docEnCarpeta(pr, d) !== dest);
+  if(!ds.length) return 0;
+  const ts = Date.now();
+  ds.forEach(d => { d.carpeta = dest; d.modificado = ts; });
+  registrarCambio('documento', (ds.length === 1 ? 'Movido «' + ds[0].nombre + '»' : 'Movidos ' + ds.length + ' documentos') + ' a «' + carpetaTxt(pr, dest) + '»');
+  save();
+  return ds.length;
+}
+function carpetaMover(c, destino){
+  if(soloLectura()) return false;
+  const pr = proyActivo(), dest = carpetaDe(pr, destino) ? destino : '';
+  if(padreDe(pr, c) === dest) return false;
+  if(carpetaRama(pr, c.id).has(dest)){ alert('No se puede meter una carpeta dentro de sí misma.'); return false; }
+  if(!nombreCarpetaLibre(pr, dest, c.nombre, c)){ alert('Ya hay una carpeta «' + c.nombre + '» en «' + carpetaTxt(pr, dest) + '».'); return false; }
+  const antes = carpetaTxt(pr, c.id);
+  c.padre = dest;
+  registrarCambio('documento', 'Carpeta «' + antes + '» movida a «' + carpetaTxt(pr, dest) + '»');
+  save();
+  return true;
+}
+/* arrastrar documentos (todos los marcados si el arrastrado lo está) o carpetas sobre una carpeta */
+let docArrastre = null;   /* {docs:[ids]} o {carpeta:id} */
+function arrastrable(n, dato){
+  if(fechaVista) return n;
+  n.setAttribute('draggable', 'true');
+  n.addEventListener('dragstart', ev => { docArrastre = dato(); if(ev.dataTransfer){ ev.dataTransfer.effectAllowed = 'move'; try{ ev.dataTransfer.setData('text/plain', 'via-doc'); }catch(e){} } });
+  n.addEventListener('dragend', () => { docArrastre = null; document.querySelectorAll('.dropok').forEach(x => x.classList.remove('dropok')); });
+  return n;
+}
+function destinoCarpeta(n, id){
+  if(fechaVista) return n;
+  n.addEventListener('dragover', ev => { if(!docArrastre) return; ev.preventDefault(); if(ev.dataTransfer) ev.dataTransfer.dropEffect = 'move'; n.classList.add('dropok'); });
+  n.addEventListener('dragleave', () => n.classList.remove('dropok'));
+  n.addEventListener('drop', ev => {
+    const a = docArrastre; docArrastre = null; n.classList.remove('dropok');
+    if(!a) return;
+    ev.preventDefault(); ev.stopPropagation();
+    if(a.carpeta){ const c = carpetaDe(proyActivo(), a.carpeta); if(c && carpetaMover(c, id)) render(); }
+    else if(a.docs && docMover(a.docs, id)){ a.docs.forEach(x => docMarcados.delete(x)); render(); }
+  });
+  return n;
+}
+/* documentos marcados en la lista: barra para moverlos de carpeta */
+function docMarcadosVigentes(pr){ const ids = new Set(docsProy(pr).map(d => d.id)); [...docMarcados].forEach(id => { if(!ids.has(id)) docMarcados.delete(id); }); return docMarcados; }
+function docBarra(){
+  const pr = proyActivo(), n = docMarcadosVigentes(pr).size;
+  if(!n || fechaVista) return el('div', {id:'docbar', style:'display:none'});
+  const iDest = el('select', {title:'Mover los documentos marcados', onchange:ev => {
+    const v = ev.target.value; if(v === '__') return;
+    const m = docMover([...docMarcados], v);
+    docMarcados.clear(); render();
+    if(!m) alert('Ya estaban en esa carpeta.');
+  }}, el('option', {value:'__', selected:'selected'}, 'Mover a carpeta…'), ...carpetaOpciones(pr, '__'));
+  return el('div', {class:'selbar', id:'docbar'},
+    el('span', {class:'n'}, n + (n === 1 ? ' documento marcado' : ' documentos marcados')),
+    iDest,
+    el('span', {class:'spacer'}),
+    el('button', {class:'btn sm', onclick:() => { docMarcados.clear(); docSelRefrescar(); }}, '✕ Quitar selección'));
+}
+/* repinta casillas y barra sin re-renderizar; `raiz`: la vista aún sin colgar del documento */
+function docSelRefrescar(raiz){
+  const r = raiz || document;
+  let vis = 0, on = 0;
+  r.querySelectorAll('tr[data-doc]').forEach(tr => {
+    const m = docMarcados.has(tr.getAttribute('data-doc'));
+    tr.classList.toggle('selr', m);
+    const cb = /** @type {HTMLInputElement} */ (tr.querySelector('td.dselc input')); if(cb) cb.checked = m;
+    if(/** @type {HTMLElement} */ (tr).style.display !== 'none'){ vis++; if(m) on++; }
+  });
+  const hd = /** @type {HTMLInputElement} */ (r.querySelector('th.dselc input'));
+  if(hd){ hd.checked = vis > 0 && on === vis; hd.indeterminate = on > 0 && on < vis; }
+  const vieja = r.querySelector('#docbar');
+  if(vieja) vieja.replaceWith(docBarra());
+}
 /* --- almacén local (IndexedDB) --- */
 let _docsDb = null;
 function docsDb(){
@@ -7508,6 +7682,27 @@ function docFormulario(d, opts){
   });
   const iFec = el('input', {type:'date', value:d ? vStr(d.fecha) : isoDia(Date.now())});
   const iDes = el('textarea', {rows:'2', placeholder:'Opcional'}); iDes.value = d ? vStr(d.descripcion) : '';
+  /* carpeta: la del documento o, si es nuevo, la que esté abierta en la vista Documentos. La carpeta
+     nueva que se cree desde aquí solo se guarda si se guarda el documento */
+  const NUEVA = '__nueva__';
+  const carp0 = d ? docEnCarpeta(pr, d) : (carpetaDe(pr, docCarpeta) ? docCarpeta : '');
+  const iCarp = el('select', null, ...carpetaOpciones(pr, carp0), el('option', {value:NUEVA}, '+ Carpeta nueva…'));
+  /** @type {{id:string, nombre:string, padre:string}|null} */
+  let nueva = null, carpPrev = carp0;
+  iCarp.addEventListener('change', () => {
+    if(iCarp.value !== NUEVA){ carpPrev = iCarp.value; return; }
+    const padre = nueva && carpPrev === nueva.id ? nueva.padre : carpPrev;
+    const n = (prompt('Nombre de la carpeta nueva, dentro de «' + carpetaTxt(pr, padre) + '»:') || '').trim();
+    if(n && /[\/\\]/.test(n)) alert('El nombre no puede llevar «/» ni «\\».');
+    else if(n && !nombreCarpetaLibre(pr, padre, n, null)) alert('Ya hay una carpeta «' + n + '» ahí: elígela en la lista.');
+    else if(n){
+      const vieja = nueva && iCarp.querySelector('option[value="' + nueva.id + '"]'); if(vieja) vieja.remove();
+      nueva = {id:uid(), nombre:n, padre};
+      iCarp.insertBefore(el('option', {value:nueva.id}, (padre ? carpetaTxt(pr, padre) + ' / ' : '') + n + ' (nueva)'), iCarp.lastChild);
+      carpPrev = nueva.id;
+    }
+    iCarp.value = carpPrev;
+  });
   const infoArch = el('div', {class:'hint', style:'margin-top:4px'}, d && d.archivo ? 'Archivo actual: ' + d.archivo.nombre + ' · ' + fmtTam(d.archivo.tam) + ' (elige otro para sustituirlo)' : 'Hasta ' + fmtTam(DOC_MAX) + '. PDF, imagen, Excel, Word…');
   iArch.addEventListener('change', () => {
     const f = iArch.files && iArch.files[0]; if(!f) return;
@@ -7519,6 +7714,7 @@ function docFormulario(d, opts){
     el('div', {class:'field'}, el('span', {class:'flab'}, 'Archivo'), iArch, infoArch),
     el('div', {class:'field'}, el('span', {class:'flab'}, 'o enlace (si el archivo vive en otro sitio)'), iEnl),
     el('div', {class:'field'}, el('span', {class:'flab'}, 'Nombre'), iNom),
+    el('div', {class:'field'}, el('span', {class:'flab'}, 'Carpeta'), iCarp),
     el('div', {class:'cols2'},
       el('div', {class:'field'}, el('span', {class:'flab'}, 'Tipo de documento'), iTipo),
       el('div', {class:'field'}, el('span', {class:'flab'}, 'Fecha'), iFec)),
@@ -7543,7 +7739,12 @@ function docFormulario(d, opts){
         await docGuardarLocal(hash, new Blob([buf], {type:f.type || 'application/octet-stream'}));
         archivo = {nombre:f.name, mime:f.type || 'application/octet-stream', tam:f.size, hash, ext:ext ? ext.toLowerCase() : '', dispositivo:ghDevice()};
       }
-      const datos = {nombre:iNom.value.trim(), tipo:iTipo.value === NUEVO ? tipo0 : iTipo.value, fecha:iFec.value, descripcion:iDes.value.trim(), archivo, enlace};
+      const carpeta = iCarp.value === NUEVA ? carp0 : iCarp.value;
+      if(nueva && carpeta === nueva.id){
+        pr.carpetasDoc = carpetasProy(pr).concat(nueva);
+        registrarCambio('documento', 'Carpeta nueva «' + carpetaTxt(pr, nueva.id) + '»');
+      }
+      const datos = {nombre:iNom.value.trim(), tipo:iTipo.value === NUEVO ? tipo0 : iTipo.value, fecha:iFec.value, descripcion:iDes.value.trim(), archivo, enlace, carpeta};
       let doc = d;
       if(d){ Object.assign(d, datos, {modificado:Date.now()}); registrarCambio('documento', 'Editado «' + d.nombre + '»'); }
       else {
@@ -7618,7 +7819,7 @@ function bloqueVincularDoc(){
   const els = selElementos(); if(!els.length) return;
   const ids = els.map(e => e.id), docs = docsProy().slice().sort((a, b) => vStr(b.fecha).localeCompare(vStr(a.fecha)));
   if(!docs.length){ docFormulario(null, {vincular:ids}); return; }
-  const iDoc = el('select', null, ...docs.map(d => el('option', {value:d.id}, d.nombre + ' · ' + (d.tipo || '') + (d.fecha ? ' · ' + new Date(d.fecha + 'T12:00:00').toLocaleDateString('es-ES') : ''))));
+  const iDoc = el('select', null, ...docOpciones(proyActivo(), docs));
   openModal('Vincular documento a ' + ids.length + ' elemento' + (ids.length === 1 ? '' : 's'),
     el('div', null,
       el('div', {class:'field'}, el('span', {class:'flab'}, 'Documento ya subido'), iDoc),
@@ -7639,7 +7840,8 @@ function panelDocsElemento(e, alCambiar, puedeSalir){
     if(ds.length){
       const lista = el('div', {class:'list', style:'margin-bottom:12px'});
       ds.forEach(d => lista.appendChild(el('div', {class:'row soft'},
-        el('span', {class:'grow'}, el('b', null, d.nombre), el('span', {style:'color:var(--tx3);font-size:12px'}, ' · ' + (d.tipo || '') + (d.fecha ? ' · ' + new Date(d.fecha + 'T12:00:00').toLocaleDateString('es-ES') : ''))),
+        el('span', {class:'grow'}, el('b', null, d.nombre), el('span', {style:'color:var(--tx3);font-size:12px'}, ' · ' + (d.tipo || '') + (d.fecha ? ' · ' + docFecha(d) : '') +
+          (docEnCarpeta(proyActivo(), d) ? ' · ' + carpetaTxt(proyActivo(), docEnCarpeta(proyActivo(), d)) : ''))),
         el('button', {type:'button', class:'btn sm', onclick:() => docAbrir(d)}, d.archivo ? 'Abrir' : 'Ir al enlace'),
         fechaVista ? null : el('button', {type:'button', class:'btn sm danger', title:'Desvincular de este elemento', onclick:() => { docVincular(d, [e.id], false); save(); pinta(); if(alCambiar) alCambiar(); }}, '✕'))));
       box.appendChild(lista);
@@ -7647,7 +7849,7 @@ function panelDocsElemento(e, alCambiar, puedeSalir){
     if(fechaVista) return;
     const libres = docsProy().filter(d => !ds.includes(d));
     if(libres.length){
-      const iDoc = el('select', {style:'flex:1;min-width:0'}, ...libres.map(d => el('option', {value:d.id}, d.nombre + ' · ' + (d.tipo || ''))));
+      const iDoc = el('select', {style:'flex:1;min-width:0'}, ...docOpciones(proyActivo(), libres));
       box.appendChild(el('div', {style:'display:flex;gap:8px;margin-bottom:8px'}, iDoc,
         el('button', {type:'button', class:'btn sm', onclick:() => { const d = libres.find(x => x.id === iDoc.value); if(!d) return; docVincular(d, [e.id], true); save(); pinta(); if(alCambiar) alCambiar(); }}, 'Vincular')));
     }
@@ -7661,47 +7863,120 @@ function panelDocsElemento(e, alCambiar, puedeSalir){
   return box;
 }
 function viewDocumentos(){
-  const c = el('div', null), pr = proyActivo(), docs = docsProy(pr);
+  const c = el('div', null), pr = proyActivo(), docs = docsProy(pr), ro = !!fechaVista;
+  if(docCarpeta && !carpetaDe(pr, docCarpeta)) docCarpeta = '';
+  docMarcadosVigentes(pr);
   c.appendChild(el('div', {class:'sec-title'}, 'Documentos y certificados', el('span', {class:'muted'}, pr.nombre + ' · ' + docs.length + ' documentos'),
     el('span', {class:'spacer'}),
+    el('button', {class:'btn sm', title:'Carpeta nueva dentro de «' + carpetaTxt(pr, docCarpeta) + '»', onclick:() => carpetaFormulario(null, docCarpeta)}, '+ Carpeta'),
     el('button', {class:'btn red sm', onclick:() => docFormulario(null)}, '+ Subir documento')));
-  if(!docs.length){
-    c.appendChild(el('div', {class:'note'}, 'Aún no hay documentos. Sube un certificado, un informe de pruebas o un acta (o pon su enlace) y vincúlalo a los elementos que cubre: un informe de pruebas de una tirada de tarjetas se vincula a todas ellas de una vez. También puedes marcar los elementos en la Base de datos y usar «Vincular documento…».'));
+  if(!docs.length && !carpetasProy(pr).length){
+    c.appendChild(el('div', {class:'note'}, 'Aún no hay documentos. Sube un certificado, un informe de pruebas o un acta (o pon su enlace) y vincúlalo a los elementos que cubre: un informe de pruebas de una tirada de tarjetas se vincula a todas ellas de una vez. También puedes marcar los elementos en la Base de datos y usar «Vincular documento…». Para tenerlos ordenados, crea carpetas y subcarpetas con «+ Carpeta».'));
     return c;
   }
   const tipos = [...new Set(docs.map(d => d.tipo).filter(Boolean))];
-  const iBus = el('input', {placeholder:'Buscar…', style:'width:auto;min-width:200px'});
+  const iBus = el('input', {placeholder:'Buscar en todas las carpetas…', style:'width:auto;min-width:220px'});
   c.appendChild(el('div', {class:'toolbar', style:'margin-bottom:4px'},
     el('select', {onchange:ev => { docFiltroTipo = ev.target.value; render(); }}, el('option', {value:''}, 'Todos los tipos'),
       ...tipos.map(t => el('option', {value:t, ...(t === docFiltroTipo ? {selected:'selected'} : {})}, t))),
-    iBus, el('span', {class:'spacer'}),
+    iBus,
+    el('label', {style:'display:flex;gap:6px;align-items:center;font-size:12.5px;color:var(--tx2);cursor:pointer;white-space:nowrap', title:'Ver también los documentos de las subcarpetas de la carpeta abierta'},
+      el('input', {type:'checkbox', style:'width:15px;height:15px;margin:0', ...(docConSub ? {checked:'checked'} : {}), onchange:ev => { docConSub = ev.target.checked; render(); }}), 'Incluir subcarpetas'),
+    el('span', {class:'spacer'}),
     GH.on ? null : el('span', {style:'color:var(--amb);font-size:12px'}, 'Sin sincronización: los archivos están solo en este navegador')));
+
+  /* nº de documentos de cada carpeta, contando sus subcarpetas */
+  const directos = new Map();
+  docs.forEach(d => { const k = docEnCarpeta(pr, d); directos.set(k, (directos.get(k) || 0) + 1); });
+  const total = (id, niv) => (niv || 0) > 50 ? 0 : (directos.get(id) || 0) + carpetaHijas(pr, id).reduce((s, h) => s + total(h.id, (niv || 0) + 1), 0);
+
+  /* árbol de carpetas */
+  const arbol = el('div', {class:'dtree'});
+  const nodo = (id, nombre, niv) => {
+    const it = el('div', {class:'dti' + (id === docCarpeta ? ' on' : ''), style:'padding-left:' + (8 + niv * 14) + 'px', title:id ? carpetaTxt(pr, id) : 'Todos los documentos del proyecto',
+      onclick:() => { docCarpeta = id; render(); }},
+      icoCarpeta(), el('span', {class:'grow'}, nombre), el('span', {class:'count'}, String(total(id))));
+    destinoCarpeta(it, id);
+    if(id) arrastrable(it, () => ({carpeta:id}));
+    return it;
+  };
+  arbol.appendChild(nodo('', 'Documentos', 0));
+  const rama = (padre, niv) => { if(niv > 50) return; carpetaHijas(pr, padre).forEach(h => { arbol.appendChild(nodo(h.id, h.nombre, niv)); rama(h.id, niv + 1); }); };
+  rama('', 1);
+
+  /* ruta de la carpeta abierta (cada tramo lleva a su carpeta y admite soltar documentos) */
+  const migas = el('div', {class:'migas'});
+  [{id:'', nombre:'Documentos'}, ...carpetaRuta(pr, docCarpeta)].forEach((x, i, arr) => {
+    if(i) migas.appendChild(el('span', {class:'sep'}, '›'));
+    const ultimo = i === arr.length - 1;
+    migas.appendChild(destinoCarpeta(ultimo ? el('b', null, x.nombre) : el('a', {href:'#', onclick:ev => { ev.preventDefault(); docCarpeta = x.id; render(); }}, x.nombre), x.id));
+  });
+  if(docCarpeta) migas.append(el('span', {class:'spacer'}),
+    el('button', {class:'btn sm', onclick:() => carpetaFormulario(carpetaDe(pr, docCarpeta))}, 'Renombrar, mover o borrar carpeta…'));
+
+  /* tabla: subcarpetas de la abierta y luego sus documentos. Se pintan TODOS los documentos y se
+     ocultan los de otras carpetas, para que el buscador encuentre en todo el proyecto sin re-renderizar */
+  const ambito = docConSub ? carpetaRama(pr, docCarpeta) : new Set([docCarpeta]);
+  const ncol = ro ? 6 : 7;
+  const filasCarp = carpetaHijas(pr, docCarpeta).map(h => {
+    const n = total(h.id), ns = carpetaHijas(pr, h.id).length;
+    const tr = el('tr', {'data-carp':h.id, style:'cursor:pointer', onclick:() => { docCarpeta = h.id; render(); }},
+      ro ? null : el('td', {class:'dselc'}),
+      el('td', {colspan:'5'}, icoCarpeta(), ' ', el('b', null, h.nombre),
+        el('span', {style:'color:var(--tx3);font-size:12px'}, ' · ' + n + ' documento' + (n === 1 ? '' : 's') + (ns ? ' · ' + ns + ' subcarpeta' + (ns === 1 ? '' : 's') : ''))),
+      el('td', {style:'white-space:nowrap'}, el('button', {class:'btn sm', onclick:ev => { ev.stopPropagation(); carpetaFormulario(h); }}, 'Editar…')));
+    destinoCarpeta(tr, h.id); arrastrable(tr, () => ({carpeta:h.id}));
+    return tr;
+  });
   const lista = docs.filter(d => !docFiltroTipo || d.tipo === docFiltroTipo).sort((a, b) => vStr(b.fecha).localeCompare(vStr(a.fecha)) || a.nombre.localeCompare(b.nombre, 'es'));
-  const w = el('div', {class:'tablewrap'});
-  const tb = el('tbody', null, ...lista.map(d => {
-    const n = docElems(d).length, donde = docDonde(d);
-    return el('tr', {'data-doc':d.id, style:'cursor:pointer' + (d.id === docSel ? ';background:var(--panel3)' : ''), onclick:() => { docSel = d.id; render(); }},
-      el('td', null, el('b', null, d.nombre), d.descripcion ? el('div', {style:'color:var(--tx3);font-size:12px'}, d.descripcion) : null),
+  const filasDoc = lista.map(d => {
+    const n = docElems(d).length, donde = docDonde(d), k = docEnCarpeta(pr, d), en = ambito.has(k);
+    const tr = el('tr', {'data-doc':d.id, 'data-en':en ? '1' : '', class:docMarcados.has(d.id) ? 'selr' : '',
+      style:'cursor:pointer' + (d.id === docSel ? ';background:var(--panel3)' : '') + (en ? '' : ';display:none'), onclick:() => { docSel = d.id; render(); }},
+      ro ? null : el('td', {class:'dselc'}, el('input', {type:'checkbox', title:'Marcar para moverlo de carpeta', ...(docMarcados.has(d.id) ? {checked:'checked'} : {}),
+        onclick:ev => { ev.stopPropagation(); if(ev.target.checked) docMarcados.add(d.id); else docMarcados.delete(d.id); docSelRefrescar(); }})),
+      el('td', null, el('b', null, d.nombre),
+        k !== docCarpeta ? el('div', {class:'druta'}, icoCarpeta(), ' ', carpetaTxt(pr, k)) : null,
+        d.descripcion ? el('div', {style:'color:var(--tx3);font-size:12px'}, d.descripcion) : null),
       el('td', null, el('span', {class:'pill ' + (/certific/i.test(d.tipo || '') ? 'green' : /prueba|ensayo/i.test(d.tipo || '') ? 'blue' : 'gray')}, d.tipo || '—')),
-      el('td', {style:'white-space:nowrap'}, d.fecha ? new Date(d.fecha + 'T12:00:00').toLocaleDateString('es-ES') : '—'),
+      el('td', {style:'white-space:nowrap'}, docFecha(d) || '—'),
       el('td', null, String(n)),
       el('td', {style:'color:var(--tx3);font-size:12px;white-space:nowrap'}, (d.archivo ? fmtTam(d.archivo.tam) + ' · ' : '') + donde,
         /pendiente|solo/.test(donde) ? el('span', {style:'color:var(--amb)'}, ' ●') : null),
       el('td', {style:'white-space:nowrap'},
         el('button', {class:'btn sm', onclick:ev => { ev.stopPropagation(); docAbrir(d); }}, d.archivo ? 'Abrir' : 'Enlace'), ' ',
         el('button', {class:'btn sm', onclick:ev => { ev.stopPropagation(); docVincularModal(d); }}, 'Vincular…')));
-  }));
-  w.appendChild(el('table', null, el('thead', null, el('tr', null, el('th', null, 'Documento'), el('th', null, 'Tipo'), el('th', null, 'Fecha'), el('th', null, 'Elementos'), el('th', null, 'Archivo'), el('th', null, ''))), tb));
-  c.appendChild(w);
-  /* búsqueda sin re-renderizar (no se pierde el foco al escribir) */
-  iBus.addEventListener('input', () => { const q = iBus.value.trim().toLowerCase();
-    tb.querySelectorAll('tr[data-doc]').forEach(tr => { const d = docs.find(x => x.id === tr.getAttribute('data-doc'));
-      tr.style.display = !q || [d.nombre, d.descripcion, d.tipo, d.archivo && d.archivo.nombre].join(' ').toLowerCase().includes(q) ? '' : 'none'; }); });
+    return arrastrable(tr, () => ({docs:docMarcados.has(d.id) ? [...docMarcados] : [d.id]}));
+  });
+  const vacio = el('tr', null, el('td', {colspan:String(ncol), class:'empty'}, ''));
+  const tb = el('tbody', null, ...filasCarp, ...filasDoc, vacio);
+  const hd = ro ? null : el('input', {type:'checkbox', title:'Marcar o desmarcar todos los de la lista', onchange:ev => {
+    tb.querySelectorAll('tr[data-doc]').forEach(tr => { if(/** @type {HTMLElement} */ (tr).style.display === 'none') return; const id = tr.getAttribute('data-doc'); if(ev.target.checked) docMarcados.add(id); else docMarcados.delete(id); });
+    docSelRefrescar(); }});
+  const w = el('div', {class:'tablewrap'}, el('table', null,
+    el('thead', null, el('tr', null, ro ? null : el('th', {class:'dselc'}, hd), el('th', null, 'Documento'), el('th', null, 'Tipo'), el('th', null, 'Fecha'), el('th', null, 'Elementos'), el('th', null, 'Archivo'), el('th', null, ''))),
+    tb));
+  /* búsqueda sin re-renderizar (no se pierde el foco al escribir): con texto, busca en todas las carpetas */
+  const txt = d => [d.nombre, d.descripcion, d.tipo, d.archivo && d.archivo.nombre, carpetaTxt(pr, docEnCarpeta(pr, d))].join(' ').toLowerCase();
+  const filtrar = () => {
+    const q = iBus.value.trim().toLowerCase(); let n = 0;
+    filasCarp.forEach(tr => { tr.style.display = q ? 'none' : ''; });
+    filasDoc.forEach(tr => { const d = docs.find(x => x.id === tr.getAttribute('data-doc'));
+      const ok = d && (q ? txt(d).includes(q) : tr.getAttribute('data-en') === '1'); tr.style.display = ok ? '' : 'none'; if(ok) n++; });
+    vacio.style.display = n || (!q && filasCarp.length) ? 'none' : '';
+    /** @type {HTMLElement} */ (vacio.firstChild).textContent = q ? 'Nada con esa búsqueda.' :
+      docFiltroTipo ? 'No hay documentos de tipo «' + docFiltroTipo + '» en esta carpeta.' :
+      'Carpeta vacía. Sube aquí un documento con «+ Subir documento» o arrastra documentos desde otra carpeta.';
+    docSelRefrescar(c);
+  };
+  iBus.addEventListener('input', filtrar);
+  c.appendChild(el('div', {class:'doclay'}, arbol, el('div', {class:'docmain'}, migas, w, docBarra())));
+  filtrar();
 
   const d = docs.find(x => x.id === docSel);
   if(!d){ c.appendChild(el('p', {class:'hint'}, 'Pulsa un documento para ver y gestionar sus elementos.')); return c; }
   const els = docElems(d);
-  c.appendChild(el('div', {class:'sec-title'}, d.nombre, el('span', {class:'muted'}, (d.tipo || '') + ' · ' + els.length + ' elementos vinculados'),
+  c.appendChild(el('div', {class:'sec-title'}, d.nombre, el('span', {class:'muted'}, (d.tipo || '') + ' · ' + carpetaTxt(pr, docEnCarpeta(pr, d)) + ' · ' + els.length + ' elementos vinculados'),
     el('span', {class:'spacer'}),
     d.archivo ? el('button', {class:'btn sm', onclick:() => docAbrir(d, true)}, 'Descargar') : null,
     el('button', {class:'btn sm', onclick:() => docFormulario(d)}, 'Editar'),
@@ -8351,11 +8626,12 @@ async function exportXLSX(){
   const docs = docsProy();
   if(docs.length){
     const wd = wb.addWorksheet('Documentos');
-    wd.columns = [{header:'Documento', key:'n', width:34}, {header:'Tipo', key:'t', width:18}, {header:'Fecha', key:'f', width:12},
+    wd.columns = [{header:'Documento', key:'n', width:34}, {header:'Carpeta', key:'k', width:28}, {header:'Tipo', key:'t', width:18}, {header:'Fecha', key:'f', width:12},
       {header:'Descripción', key:'d', width:30}, {header:'Archivo o enlace', key:'a', width:30}, {header:'Nº elementos', key:'c', width:12}, {header:'Elementos', key:'e', width:60}];
     wd.getRow(1).font = {bold:true};
-    docs.forEach(d => { const es = docElems(d);
-      wd.addRow({n:d.nombre, t:d.tipo || '', f:d.fecha || '', d:d.descripcion || '', a:d.archivo ? d.archivo.nombre : (d.enlace || ''), c:es.length,
+    const prd = proyActivo(), ruta = d => docEnCarpeta(prd, d) ? carpetaTxt(prd, docEnCarpeta(prd, d)) : '';
+    docs.slice().sort((x, y) => ruta(x).localeCompare(ruta(y), 'es', {numeric:true}) || x.nombre.localeCompare(y.nombre, 'es', {numeric:true})).forEach(d => { const es = docElems(d);
+      wd.addRow({n:d.nombre, k:ruta(d), t:d.tipo || '', f:d.fecha || '', d:d.descripcion || '', a:d.archivo ? d.archivo.nombre : (d.enlace || ''), c:es.length,
         e:es.map(e => (e.codigo || (getTipo(e.tipoId) || {}).nombre || '') + (e.valores.f_nserie ? ' (S/N ' + e.valores.f_nserie + ')' : '')).join(', ')}); });
   }
   const buf = await wb.xlsx.writeBuffer();
