@@ -110,7 +110,13 @@ const PRIMITIVOS = [
   {id:'pk',      nombre:'PK (punto km)'},
   {id:'photo',   nombre:'Foto'},
   {id:'doc',     nombre:'Documento'},
+  {id:'lugar',   nombre:'Lugar (enclavamiento, estación…)'},
 ];
+/* tipos de lugar: un lugar es un tramo de PK con nombre; los de tipos distintos pueden solaparse
+   (una señal es a la vez de la estación de Catoira y de su enclavamiento) */
+const TIPOS_LUGAR_DEF = ['Estación', 'Enclavamiento', 'Trayecto', 'Edificio técnico', 'Otro'];
+const tiposLugar = () => (state.tiposLugar && state.tiposLugar.length) ? state.tiposLugar : TIPOS_LUGAR_DEF;
+const tipoLugarDefecto = nombre => /enclav/i.test(nombre || '') ? 'Enclavamiento' : 'Estación';
 const primNombre = id => (PRIMITIVOS.find(p => p.id === id) || {}).nombre || id;
 
 /* ================= semilla ================= */
@@ -303,6 +309,9 @@ function migrar(){
     if(!Array.isArray(p.lugares)) p.lugares = [];
     if(!Array.isArray(p.andenes)) p.andenes = [];
     if(!Array.isArray(p.replanteos)) p.replanteos = [];
+    p.lugares.forEach(l => { if(!l.tipo) l.tipo = tipoLugarDefecto(l.nombre); });
+    if(!Array.isArray(p.documentos)) p.documentos = [];
+    if(!Array.isArray(p.carpetasDoc)) p.carpetasDoc = [];
     if(p.modo !== 'diseno' && p.modo !== 'seguimiento') p.modo = 'seguimiento';
     if(!p.diseno || typeof p.diseno !== 'object') p.diseno = {};
     ['vias','agujas','piquetes','estaciones','pasos','perfil','existentes','generados'].forEach(k => { if(!Array.isArray(p.diseno[k])) p.diseno[k] = []; });
@@ -311,6 +320,9 @@ function migrar(){
     if(p.diseno.parametros.catAM == null) p.diseno.parametros.catAM = '';
   });
   state.elementos.forEach(e => { if(!Array.isArray(e.hist)) e.hist = []; });
+  if(!Array.isArray(state.tiposLugar) || !state.tiposLugar.length) state.tiposLugar = TIPOS_LUGAR_DEF.slice();
+  if(!Array.isArray(state.tiposDoc) || !state.tiposDoc.length) state.tiposDoc = TIPOS_DOC_DEF.slice();
+  state.proyectos.forEach(p => p.lugares.forEach(l => { if(!state.tiposLugar.includes(l.tipo)) state.tiposLugar.push(l.tipo); }));
   if(!Array.isArray(state.bdCols)) state.bdCols = ['codigo', 'tipo', 'pk', 'estado', 'contr', 'lugar', 'mod'];
   /* reglas de campos condicionales por defecto (una sola vez) */
   if(!state.reglasSeed){
@@ -358,6 +370,64 @@ function migrar(){
     const rf = tc && tc.campos.find(r => r.campoId === 'f_pkfin');
     if(rf && !rf.regla) rf.regla = {juntar:'Y', conds:[{campoId:'f_tcanal', op:'noEs', valor:'Cruce bajo vía'}]};
     state.cruceV1 = true;
+  }
+  /* certificación parcial: «% certificado» o «Cantidad certificada» (una de las dos) y una
+     descripción opcional. «Cantidad certificada» solo tiene sentido en la parcial: «Certificado»
+     es el total y el resto, cero. */
+  if(!state.certParcialV1){
+    const cCert = state.campos.find(c => c.id === 'f_cert');
+    if(cCert){
+      cCert.opciones = cCert.opciones || [];
+      if(!cCert.opciones.includes(CERT_PARCIAL)){
+        const i = cCert.opciones.indexOf('Certificado');
+        cCert.opciones.splice(i < 0 ? cCert.opciones.length : i, 0, CERT_PARCIAL);
+      }
+    }
+    const nuevos = [
+      {id:'f_certpct', etiqueta:'% certificado', tipo:'number'},
+      {id:'f_certdesc', etiqueta:'Descripción de la certificación', tipo:'text'}
+    ];
+    nuevos.forEach(d => { if(!state.campos.some(c => c.id === d.id)) state.campos.push(d); });
+    const soloParcial = () => ({juntar:'Y', conds:[{campoId:'f_cert', op:'es', valor:CERT_PARCIAL}]});
+    state.elementTypes.forEach(t => {
+      if(!t.campos.some(r => r.campoId === 'f_cert')) return;
+      const iCant = t.campos.findIndex(r => r.campoId === 'f_certcant');
+      if(!t.campos.some(r => r.campoId === 'f_certpct'))
+        t.campos.splice(iCant < 0 ? t.campos.length : iCant, 0, {campoId:'f_certpct', obligatorio:false, regla:soloParcial()});
+      const iCant2 = t.campos.findIndex(r => r.campoId === 'f_certcant');
+      if(iCant2 >= 0 && !t.campos[iCant2].regla) t.campos[iCant2].regla = soloParcial();
+      if(!t.campos.some(r => r.campoId === 'f_certdesc'))
+        t.campos.splice(iCant2 < 0 ? t.campos.length : iCant2 + 1, 0, {campoId:'f_certdesc', obligatorio:false,
+          regla:{juntar:'Y', conds:[{campoId:'f_cert', op:'unoDe', valor:[CERT_PARCIAL, 'Certificado']}]}});
+    });
+    state.certParcialV1 = true;
+  }
+  /* tarjetas del enclavamiento (de entradas, de señales…): sin PK, con Nº de serie y el
+     enclavamiento al que pertenecen. Si ya hay un tipo «Tarjeta» vacío creado a mano, se rellena ese. */
+  if(!state.tarjetaV1){
+    [
+      {id:'f_ttarj', etiqueta:'Tipo de tarjeta', tipo:'select', opciones:['Entradas', 'Señales']},
+      {id:'f_nserie', etiqueta:'Nº de serie', tipo:'text'},
+      {id:'f_enclav', etiqueta:'Enclavamiento', tipo:'lugar', lugarTipo:'Enclavamiento'},
+      {id:'f_bastidor', etiqueta:'Bastidor / posición', tipo:'text'}
+    ].forEach(d => { if(!state.campos.some(c => c.id === d.id)) state.campos.push(d); });
+    const r = (id, ob, regla) => Object.assign({campoId:id, obligatorio:!!ob}, regla ? {regla} : {});
+    const certEs = v => ({juntar:'Y', conds:[{campoId:'f_cert', op:'es', valor:v}]});
+    const campos = [r('f_ttarj', 1), r('f_nserie', 1), r('f_enclav', 0), r('f_bastidor', 0), r('f_estado', 0),
+      r('f_finst', 0, {juntar:'Y', conds:[{campoId:'f_estado', op:'unoDe', valor:['Instalado', 'Verificado']}]}),
+      r('f_contr', 0), r('f_obs', 0), r('f_foto', 0),
+      r('f_cert', 0), r('f_nacopio', 0, certEs('Acopiado')), r('f_cant', 0), r('f_certpct', 0, certEs(CERT_PARCIAL)),
+      r('f_certcant', 0, certEs(CERT_PARCIAL)), r('f_certdesc', 0, {juntar:'Y', conds:[{campoId:'f_cert', op:'unoDe', valor:[CERT_PARCIAL, 'Certificado']}]})];
+    /* «vacío» = sin más campos que los de certificación que la migración añade a todos los tipos */
+    const CERTC = ['f_cert', 'f_nacopio', 'f_cant', 'f_certcant', 'f_certpct', 'f_certdesc'];
+    const tj = state.elementTypes.find(t => /^tarjetas?$/i.test(vStr(t.nombre).trim()));
+    if(tj){
+      if(tj.campos.every(x => CERTC.includes(x.campoId))) tj.campos = campos;
+      else if(!tj.campos.some(x => x.campoId === 'f_nserie')) tj.campos.splice(0, 0, r('f_nserie', 1));
+      if(!tj.prefijo) tj.prefijo = 'TJ';
+    }
+    else state.elementTypes.push({id:'t_tarj', nombre:'Tarjeta', prefijo:'TJ', color:'#2bb3a6', campos});
+    state.tarjetaV1 = true;
   }
 }
 function load(){
@@ -482,6 +552,7 @@ async function syncPush(){
         body: JSON.stringify({ message: 'foto ' + id, content: b64, branch: GH.branch }) });
       if(!put.ok && put.status !== 422) throw new Error('foto ' + id + ': ' + put.status);
     }
+    await ghSubirDocsPendientes();
     const rev = Date.now();
     clone.__rev = rev; clone.__device = ghDevice();
     const body = { message: 'sync ' + new Date(rev).toISOString().slice(0, 19).replace('T', ' '), content: b64EncUtf8(JSON.stringify(clone)), branch: GH.branch };
@@ -598,11 +669,24 @@ function soloLectura(){
   if(fechaVista){ alert('Estás viendo el proyecto a una fecha pasada (solo lectura). Pulsa "Hoy" para volver y editar.'); return true; }
   return false;
 }
-function registrarCambio(accion, detalle, ref){
+/* refs: varios elementos a la vez (edición en bloque, vinculación de documentos) */
+function registrarCambio(accion, detalle, ref, refs){
   const pr = proyActivo(); if(!pr) return;
   pr.historial = pr.historial || [];
-  pr.historial.push({ts:Date.now(), accion, detalle:detalle || '', ref:ref || null});
+  const h = {ts:Date.now(), accion, detalle:detalle || '', ref:ref || null};
+  if(refs && refs.length) h.refs = refs.slice();
+  pr.historial.push(h);
   if(pr.historial.length > 3000) pr.historial.splice(0, pr.historial.length - 3000);
+}
+/* guarda en el elemento cómo estaba ANTES de un cambio (es lo que lee «Ver a fecha» y el
+   historial de la ficha). `origen` dice desde dónde se cambió: ficha, esquema, en bloque… */
+const HIST_MAX = 40;
+function histGuardar(e, ts, origen){
+  e.hist = e.hist || [];
+  const h = {ts:ts || Date.now(), snap:{codigo:e.codigo, valores:clone(e.valores), plano:e.plano ? clone(e.plano) : null}};
+  if(origen) h.origen = origen;
+  e.hist.push(h);
+  if(e.hist.length > HIST_MAX) e.hist.shift();
 }
 function estadoBadgeClass(val){
   const v = (val || '').toLowerCase();
@@ -710,9 +794,12 @@ function focosResumen(v){
 function focosWidget(hidden, ro){
   const cols = (getCampo('f_sfocos') || {}).opciones || ['Amarillo', 'Rojo', 'Verde', 'Blanco'];
   const st = parseFocos(hidden.value); delete st._total;
+  const inicial = hidden.value;
   const tot = el('div', {style:'font-size:12px;color:var(--tx3);margin-top:2px'});
   const wrap = el('div', {style:'display:flex;flex-direction:column;gap:6px;margin-bottom:4px'});
-  const sync = () => { hidden.value = JSON.stringify(st); tot.textContent = (focosTotal(st) || 0) + ' focos en total'; hidden.dispatchEvent(new Event('input', {bubbles:true})); };
+  /* sin focos se deja el valor como venía: si no, abrir y guardar la ficha apuntaba un cambio
+     («Nº de focos: 0 focos») en el historial y en el replanteo sin haber tocado nada */
+  const sync = () => { hidden.value = (!focosTotal(st) && !focosTotal(inicial)) ? inicial : JSON.stringify(st); tot.textContent = (focosTotal(st) || 0) + ' focos en total'; hidden.dispatchEvent(new Event('input', {bubbles:true})); };
   cols.forEach(nom => {
     if(st[nom] == null) st[nom] = 0;
     const num = el('span', {style:'min-width:26px;text-align:center;font-variant-numeric:tabular-nums;font-weight:600'}, String(st[nom]));
@@ -728,15 +815,43 @@ function focosWidget(hidden, ro){
   wrap.appendChild(tot); sync();
   return wrap;
 }
-/* lugar (estación/tramo con nombre) al que pertenece un elemento, por solape de PK */
-function lugarDe(e){
-  const lugares = (proyActivo() || {}).lugares || []; if(!lugares.length) return null;
+/* lugares (estación, enclavamiento…) a los que pertenece un elemento: como mucho uno de cada
+   tipo. Primero los que diga un campo de tipo «Lugar» (las tarjetas no tienen PK: se dice a mano
+   de qué enclavamiento son); para el resto de tipos, el primero cuyo tramo de PK solape. */
+function lugaresDe(e){
+  const pr = state.proyectos.find(p => p.id === e.proyectoId) || proyActivo();
+  const lugares = (pr || {}).lugares || []; if(!lugares.length) return [];
+  const out = [];
+  const t = getTipo(e.tipoId);
+  if(t) t.campos.forEach(r => {
+    const c = getCampo(r.campoId); if(!c || c.tipo !== 'lugar') return;
+    const l = lugarPorNombre(pr, e.valores[r.campoId], c.lugarTipo);
+    if(l && !out.some(o => o.tipo === l.tipo)) out.push(l);
+  });
   const p = elemPK(e);
   const a = !isNaN(p.ini) ? p.ini : (!isNaN(p.pu) ? p.pu : NaN);
   const b = !isNaN(p.fin) ? p.fin : (!isNaN(p.pu) ? p.pu : NaN);
-  if(isNaN(a) && isNaN(b)) return null;
-  const lo = isNaN(a) ? b : a, hi = isNaN(b) ? a : b;
-  return lugares.find(l => hi >= l.pkIni && lo <= l.pkFin) || null;
+  if(!isNaN(a) || !isNaN(b)){
+    const lo = isNaN(a) ? b : a, hi = isNaN(b) ? a : b;
+    lugares.forEach(l => { if(hi >= l.pkIni && lo <= l.pkFin && !out.some(o => o.tipo === l.tipo)) out.push(l); });
+  }
+  return out;
+}
+/* el lugar de un tipo dado (o el primero, sin tipo) */
+function lugarDe(e, tipo){ const ls = lugaresDe(e); return (tipo ? ls.find(l => l.tipo === tipo) : ls[0]) || null; }
+function lugarPorNombre(pr, nombre, tipo){
+  const n = vStr(nombre).trim().toLowerCase(); if(!n || !pr) return null;
+  return (pr.lugares || []).find(l => vStr(l.nombre).trim().toLowerCase() === n && (!tipo || l.tipo === tipo)) || null;
+}
+const lugarTxt = l => l.nombre + (l.tipo ? ' (' + l.tipo.toLowerCase() + ')' : '');
+/* desplegable de un campo de tipo «Lugar»: los lugares del proyecto (del tipo que diga el campo) */
+function selectLugar(c, val){
+  const ls = (proyActivo().lugares || []).filter(l => !c.lugarTipo || l.tipo === c.lugarTipo).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+  const v = vStr(val).trim().toLowerCase();
+  const s = el('select', null, el('option', {value:''}, '—'),
+    ...ls.map(l => el('option', {value:l.nombre, ...(l.nombre.trim().toLowerCase() === v ? {selected:'selected'} : {})}, c.lugarTipo ? l.nombre : lugarTxt(l))));
+  if(v && !ls.some(l => l.nombre.trim().toLowerCase() === v)) s.appendChild(el('option', {value:vStr(val), selected:'selected'}, vStr(val) + ' (no existe)'));
+  return s;
 }
 function valorEstado(e){
   const t = getTipo(e.tipoId); if(!t) return '';
@@ -799,7 +914,10 @@ function kmDeElementos(es){
   return es.reduce((a, e) => { const p = elemPK(e); return a + ((!isNaN(p.ini) && !isNaN(p.fin)) ? Math.abs(p.fin - p.ini) : 0); }, 0);
 }
 const ESTADOS_M = ['Pendiente', 'En ejecución', 'Instalado', 'Verificado', 'Con incidencia'];
-const CERTS = ['Sin certificar', 'Acopiado', 'Certificado'];
+const CERT_PARCIAL = 'Certificación parcial';
+const CERTS = ['Sin certificar', 'Acopiado', CERT_PARCIAL, 'Certificado'];
+const certClase = cc => cc === 'Certificado' ? 'green' : cc === CERT_PARCIAL ? 'blue' : cc === 'Acopiado' ? 'amber' : 'gray';
+const tipoConPk = t => !!(t && t.campos.some(r => (getCampo(r.campoId) || {}).tipo === 'pk'));
 function tipoEsLineal(t){ return !!(t && t.campos.some(r => (getCampo(r.campoId) || {}).etiqueta === 'PK inicio') && t.campos.some(r => (getCampo(r.campoId) || {}).etiqueta === 'PK fin')); }
 function metrosDe(e){ const p = elemPK(e); return (!isNaN(p.ini) && !isNaN(p.fin)) ? Math.round(Math.abs(p.fin - p.ini) * 1000) : 0; }
 function certDe(e){ const t = getTipo(e.tipoId); if(!t) return ''; const r = t.campos.find(rr => rr.campoId === 'f_cert'); return r ? (e.valores.f_cert || 'Sin certificar') : ''; }
@@ -859,10 +977,11 @@ function render(){
   const _wy = window.scrollY, _misma = _vistaPrevia === currentView + '|' + modoActual();
   root.innerHTML = '';
   const dsg = modoActual() === 'diseno';
-  const map = {resumen:viewResumen, plano:viewPlano, esquema:viewEsquema, bd:viewBD, certif:viewCertificaciones, replanteo:viewReplanteos, historial:viewHistorial, modelo:viewModelo, entrada:viewDatosEntrada, generar:viewGenerar};
+  const map = {resumen:viewResumen, plano:viewPlano, esquema:viewEsquema, bd:viewBD, certif:viewCertificaciones, docs:viewDocumentos, replanteo:viewReplanteos, historial:viewHistorial, modelo:viewModelo, entrada:viewDatosEntrada, generar:viewGenerar};
   if(dsg){ map.esquema = viewEsquemaDiseno; map.bd = viewBDDiseno; map.cableado = viewCableado; map.esqcable = viewEsquemaCable; }
   if(dsg && !['entrada','generar','esquema','plano','bd','cableado','esqcable'].includes(currentView)) currentView = 'entrada';
   if(!dsg && ['entrada','generar','cableado','esqcable'].includes(currentView)) currentView = 'resumen';
+  if(dsg && currentView === 'docs') currentView = 'entrada';
   root.appendChild((map[currentView] || viewResumen)());
   _vistaPrevia = currentView + '|' + modoActual();
   if(_misma && window.scrollY !== _wy) window.scrollTo(window.scrollX, _wy);
@@ -926,7 +1045,7 @@ function renderNav(){
   (modoActual() === 'diseno'
     ? [['entrada','Datos de entrada'], ['generar','Generar señalización'], ['esquema','Esquema por PK'], ['bd','Base de datos'],
        ['cableado','Cableado' + (np ? ' · ' + np : '')], ['esqcable','Esquema de cables'], ['plano','Plano']]
-    : [['resumen','Resumen'], ['plano','Plano'], ['esquema','Esquema'], ['bd','Base de datos'], ['certif','Certificaciones'], ['replanteo','Replanteos'], ['historial','Historial'], ['modelo','Modelo de datos']]
+    : [['resumen','Resumen'], ['plano','Plano'], ['esquema','Esquema'], ['bd','Base de datos'], ['certif','Certificaciones'], ['docs','Documentos'], ['replanteo','Replanteos'], ['historial','Historial'], ['modelo','Modelo de datos']]
   ).forEach(([v, t]) => nav.appendChild(el('button', {class:'navi' + (currentView === v ? ' on' : ''), onclick:() => setView(v)}, t)));
 }
 function renderTopRight(){
@@ -2519,9 +2638,9 @@ async function dzExportGenerados(){
   const pseudo = {lugares:[], vias:[]};
   dzGeometriaASeguimiento(d, pseudo);
   const wl = wb.addWorksheet('Lugares');
-  wl.columns = [{header:'Nombre', key:'n', width:22}, {header:'PK inicio', key:'a', width:14}, {header:'PK fin', key:'b', width:14}];
+  wl.columns = [{header:'Nombre', key:'n', width:22}, {header:'Tipo', key:'t', width:16}, {header:'PK inicio', key:'a', width:14}, {header:'PK fin', key:'b', width:14}];
   wl.getRow(1).font = {bold:true};
-  pseudo.lugares.forEach(l => wl.addRow({n:l.nombre, a:toPkStr(l.pkIni), b:toPkStr(l.pkFin)}));
+  pseudo.lugares.forEach(l => wl.addRow({n:l.nombre, t:l.tipo || 'Estación', a:toPkStr(l.pkIni), b:toPkStr(l.pkFin)}));
   const wv = wb.addWorksheet('Vias esquema');
   wv.columns = [{header:'Nº vía', key:'num', width:10}, {header:'Tipo', key:'tipo', width:14},
     {header:'Sale de la vía', key:'padre', width:16}, {header:'Lugar', key:'lugar', width:20},
@@ -3337,7 +3456,7 @@ function dzGeometriaASeguimiento(d, pr){
     if(!nom || !isFinite(a) || !isFinite(b)) return;
     const ya = pr.lugares.find(l => String(l.nombre || '').toLowerCase() === nom.toLowerCase());
     if(ya){ ya.pkIni = Math.min(a, b); ya.pkFin = Math.max(a, b); }
-    else { pr.lugares.push({id:uid(), nombre:nom, pkIni:Math.min(a, b), pkFin:Math.max(a, b)}); nL++; }
+    else { pr.lugares.push({id:uid(), nombre:nom, tipo:'Estación', pkIni:Math.min(a, b), pkFin:Math.max(a, b)}); nL++; }
   });
   const lugId = nom => (pr.lugares.find(l => String(l.nombre || '').toLowerCase() === String(nom || '').trim().toLowerCase()) || {}).id || 'general';
   const esGen = v => /general|banaliz/i.test(v.tipo || '');
@@ -3479,9 +3598,7 @@ function dzEnviarASeguimiento(){
               && (e.codigo || '') === (g.codigo || '') && (e.valores.f_est || '') === (g.est || ''))
           : null;
         if(prev){
-          prev.hist = prev.hist || [];
-          prev.hist.push({ts:Date.now(), snap:{codigo:prev.codigo, valores:clone(prev.valores), plano:prev.plano ? clone(prev.plano) : null}});
-          if(prev.hist.length > 40) prev.hist.shift();
+          histGuardar(prev, Date.now(), 'Diseño → Seguimiento');
           Object.assign(prev.valores, val);                    /* respeta estado, fotos y lo demás */
           prev.origenDiseno = srcId; prev.modificado = Date.now();
           nAct++;
@@ -4048,15 +4165,36 @@ function viewResumen(){
 /* ================= vista: Certificaciones ================= */
 let certSort = {col:'codigo', dir:1};
 /* cantidad total y certificada de un elemento, con su unidad */
+/* número de un valor de campo («60», «60,5», «» → NaN) */
+const numCampo = v => { const s = String(v == null ? '' : v).trim().replace(',', '.'); return s === '' ? NaN : +s; };
+/* medición de un elemento: total (f_cant, o los metros entre PK inicio y fin, o 1 ud) y lo
+   certificado. «Certificado» es el total; la parcial, su cantidad o su % del total; el resto, 0.
+   (Antes un «Cantidad certificada» vacío contaba como 0 aunque el elemento estuviera certificado.) */
 function medidaDe(e){
   const t = getTipo(e.tipoId), lin = tipoEsLineal(t);
-  let total = +e.valores.f_cant;
+  let total = numCampo(e.valores.f_cant);
   if(!(total > 0)) total = lin ? metrosDe(e) : 1;
-  let cert = +e.valores.f_certcant;
-  if(!(cert >= 0) || isNaN(cert)) cert = (certDe(e) === 'Certificado') ? total : 0;
-  cert = Math.min(cert, total);
-  return {total, cert, unidad: lin ? 'm' : 'ud', lin};
+  const est = certDe(e);
+  let cert = 0, pct = NaN;
+  if(est === 'Certificado') cert = total;
+  else if(est === CERT_PARCIAL){
+    const q = numCampo(e.valores.f_certcant), p = numCampo(e.valores.f_certpct);
+    if(q >= 0) cert = q; else if(p >= 0) cert = total * p / 100;
+  }
+  cert = Math.max(0, Math.min(cert, total));
+  if(total > 0) pct = cert / total * 100;
+  return {total, cert, pct, unidad: lin ? 'm' : 'ud', lin};
 }
+/* «Parcial · 60 %» o el estado tal cual */
+function certTexto(e){
+  const cc = certDe(e);
+  if(cc !== CERT_PARCIAL) return cc || 'Sin certificar';
+  const p = numCampo(e.valores.f_certpct), q = numCampo(e.valores.f_certcant), m = medidaDe(e);
+  if(p >= 0) return 'Parcial · ' + fmtNum(p) + ' %';
+  if(q >= 0) return 'Parcial · ' + (m.total > 0 ? fmtNum(m.pct) + ' %' : fmtNum(q, 2) + ' ' + m.unidad);
+  return 'Parcial · ¿%?';
+}
+const fmtNum = (v, dec) => (Math.round(v * Math.pow(10, dec == null ? 1 : dec)) / Math.pow(10, dec == null ? 1 : dec)).toLocaleString('es-ES');
 function viewCertificaciones(){
   const c = el('div', null);
   const els = elementosProy();
@@ -4067,15 +4205,18 @@ function viewCertificaciones(){
     ...[['cert', 'Certificación'], ['inst', 'Instalados']].map(([k, t]) => el('button', {class:'btn sm ' + (certTab === k ? 'red' : 'ghost'), onclick:() => { certTab = k; render(); }}, t))));
   if(certTab === 'inst') return viewInstalados(c);
   if(!els.length){ c.appendChild(el('div', {class:'note'}, 'El proyecto no tiene elementos. Usa "+ Añadir elemento" (los campos de certificación —estado, cantidad, cantidad certificada, nº de acopio— salen en la ficha de cualquier elemento).')); return c; }
-  c.appendChild(el('p', {class:'hint', style:'margin-top:0'}, 'La certificación (estado, cantidad, cantidad certificada, nº de acopio) se rellena en la ficha de cada elemento.'));
+  c.appendChild(el('p', {class:'hint', style:'margin-top:0'}, 'La certificación (estado, % o cantidad certificada, nº de acopio) se rellena en la ficha de cada elemento, o en bloque marcando varios en la lista de abajo.'));
 
   const cnt = cert => els.filter(e => certDe(e) === cert).length;
   const metrosCert = cert => els.reduce((a, e) => a + (certDe(e) === cert ? metrosDe(e) : 0), 0);
+  /* metros certificados de verdad: los parciales cuentan por su parte */
+  const mCert = els.reduce((a, e) => { const m = medidaDe(e); return a + (m.lin ? m.cert : 0); }, 0);
   c.appendChild(el('div', {class:'stats'},
     el('div', {class:'stat'}, el('div', {class:'n'}, String(cnt('Sin certificar'))), el('div', {class:'l'}, 'Sin certificar')),
     el('div', {class:'stat'}, el('div', {class:'n'}, String(cnt('Acopiado'))), el('div', {class:'l'}, 'Acopiado')),
+    el('div', {class:'stat'}, el('div', {class:'n'}, String(cnt(CERT_PARCIAL))), el('div', {class:'l'}, 'Certificación parcial')),
     el('div', {class:'stat'}, el('div', {class:'n', html:'<em>' + cnt('Certificado') + '</em>'}), el('div', {class:'l'}, 'Certificado')),
-    el('div', {class:'stat'}, el('div', {class:'n'}, (metrosCert('Certificado')).toLocaleString('es-ES') + ' m'), el('div', {class:'l'}, 'Metros certificados')),
+    el('div', {class:'stat'}, el('div', {class:'n'}, fmtNum(mCert, 0) + ' m'), el('div', {class:'l'}, 'Metros certificados')),
     el('div', {class:'stat'}, el('div', {class:'n'}, (metrosCert('Acopiado')).toLocaleString('es-ES') + ' m'), el('div', {class:'l'}, 'Metros acopiados'))
   ));
 
@@ -4096,10 +4237,10 @@ function viewCertificaciones(){
       return el('tr', null,
         el('td', null, el('span', {class:'swatch', style:'display:inline-block;margin-right:7px;vertical-align:1px;background:' + t.color}), t.nombre),
         el('td', {style:'color:var(--tx3)'}, u),
-        el('td', null, tot.toLocaleString('es-ES')),
-        el('td', {style: pc >= 100 ? 'color:var(--grn)' : ''}, ce.toLocaleString('es-ES')),
+        el('td', null, fmtNum(tot, 2)),
+        el('td', {style: pc >= 100 ? 'color:var(--grn)' : ''}, fmtNum(ce, 2)),
         el('td', null, pc + '%'),
-        el('td', {style: (tot - ce) ? 'color:var(--amb)' : ''}, (tot - ce).toLocaleString('es-ES'))
+        el('td', {style: (tot - ce) > 1e-9 ? 'color:var(--amb)' : ''}, fmtNum(tot - ce, 2))
       );
     }))
   ));
@@ -4113,7 +4254,7 @@ function viewCertificaciones(){
     el('tbody', null, ...CERTS.map(cc => {
       const fila = els.filter(e => certDe(e) === cc);
       return el('tr', null,
-        el('td', null, el('span', {class:'pill ' + (cc === 'Certificado' ? 'green' : cc === 'Acopiado' ? 'amber' : 'gray')}, cc)),
+        el('td', null, el('span', {class:'pill ' + certClase(cc)}, cc)),
         ...ESTADOS_M.map(s => { const n = fila.filter(e => valorEstado(e).toLowerCase().includes(s.toLowerCase().slice(0, 6))).length; return el('td', null, n || '—'); }),
         el('td', null, el('b', null, String(fila.length)))
       );
@@ -4184,24 +4325,28 @@ function viewCertificaciones(){
   });
   const thS = (label, col) => el('th', {class:'sortable', onclick:() => { if(certSort.col === col) certSort.dir *= -1; else { certSort.col = col; certSort.dir = 1; } render(); }},
     label, el('span', {class:'arw'}, certSort.col === col ? (certSort.dir > 0 ? '▲' : '▼') : '⇅'));
+  const conSel = !fechaVista;
   const w4 = el('div', {class:'tablewrap'});
   w4.appendChild(el('table', null,
-    el('thead', null, el('tr', null, thS('Código', 'codigo'), thS('Tipo', 'tipo'), thS('PK', 'pk'), thS('Certificación', 'cert'), thS('Acopio', 'acopio'), thS('Estado', 'estado'), el('th', null, ''))),
+    el('thead', null, el('tr', null, conSel ? selCabecera(filas.map(e => e.id)) : null, thS('Código', 'codigo'), thS('Tipo', 'tipo'), thS('PK', 'pk'), thS('Certificación', 'cert'), el('th', null, 'Certificado'), thS('Acopio', 'acopio'), thS('Estado', 'estado'), el('th', null, ''))),
     el('tbody', null, ...filas.map(e => {
       const t = getTipo(e.tipoId) || {};
-      const cc = certDe(e), est = valorEstado(e);
-      return el('tr', null,
+      const cc = certDe(e), est = valorEstado(e), m = medidaDe(e);
+      const celdas = [
         el('td', null, el('code', {class:'pill2'}, e.codigo || '—')),
         el('td', null, el('span', {class:'swatch', style:'display:inline-block;margin-right:7px;vertical-align:1px;background:' + (t.color || '#888')}), t.nombre || '—'),
         el('td', null, valorPK(e) || '—'),
-        el('td', null, el('span', {class:'pill ' + (cc === 'Certificado' ? 'green' : cc === 'Acopiado' ? 'amber' : 'gray')}, cc || 'Sin certificar')),
+        el('td', null, el('span', {class:'pill ' + certClase(cc), title:vStr(e.valores.f_certdesc)}, certTexto(e)),
+          e.valores.f_certdesc ? el('div', {style:'color:var(--tx3);font-size:11px;margin-top:3px'}, e.valores.f_certdesc) : null),
+        el('td', {style:'white-space:nowrap;color:var(--tx2)'}, cc ? fmtNum(m.cert, 2) + ' / ' + fmtNum(m.total, 2) + ' ' + m.unidad : '—'),
         el('td', null, acopioDe(e) || '—'),
         el('td', null, est ? el('span', {class:'badge ' + estadoBadgeClass(est)}, est) : '—'),
-        el('td', null, el('button', {class:'btn sm', onclick:() => nuevoElemento(e.id)}, 'Abrir'))
-      );
+        el('td', null, el('button', {class:'btn sm', onclick:() => nuevoElemento(e.id)}, 'Abrir'))];
+      return conSel ? selFila(e, ...celdas) : el('tr', null, ...celdas);
     }))
   ));
   c.appendChild(w4);
+  if(conSel) c.appendChild(barraSeleccion());
   return c;
 }
 
@@ -4223,7 +4368,7 @@ function viewHistorial(){
 
   let filas = h.reverse();
   if(histFiltro) filas = filas.filter(x => x.accion === histFiltro);
-  const claseAcc = a => /alta|import/i.test(a) ? 'green' : /baja/i.test(a) ? 'red' : /edit/i.test(a) ? 'amber' : 'gray';
+  const claseAcc = a => /alta|import/i.test(a) ? 'green' : /baja/i.test(a) ? 'red' : /edic/i.test(a) ? 'amber' : 'gray';
   const wrap = el('div', {class:'tablewrap'});
   wrap.appendChild(el('table', null,
     el('thead', null, el('tr', null, el('th', null, 'Fecha y hora'), el('th', null, 'Acción'), el('th', null, 'Detalle'), el('th', null, ''))),
@@ -4232,7 +4377,12 @@ function viewHistorial(){
       el('td', null, el('span', {class:'pill ' + claseAcc(x.accion)}, x.accion)),
       el('td', null, x.detalle || '—'),
       el('td', null, x.ref && state.elementos.some(e => e.id === x.ref && !e.borrado)
-        ? el('button', {class:'btn sm', onclick:() => nuevoElemento(x.ref)}, 'Abrir') : null)
+        ? el('button', {class:'btn sm', onclick:() => nuevoElemento(x.ref)}, 'Abrir')
+        : (x.refs && x.refs.length && !fechaVista) ? el('button', {class:'btn sm', title:'Marcar estos elementos en la Base de datos', onclick:() => {
+            selVigente(); selElems.clear();
+            x.refs.forEach(id => { if(state.elementos.some(e => e.id === id && !e.borrado)) selElems.add(id); });
+            if(!selElems.size){ alert('Esos elementos ya no existen.'); return; }
+            setView('bd'); }}, 'Seleccionar (' + x.refs.length + ')') : null)
     )))
   ));
   c.appendChild(wrap);
@@ -4327,11 +4477,12 @@ function viewInstalados(c){
   if(!enPer.length){ c.appendChild(el('div', {class:'note'}, 'No se instaló nada entre esas fechas.')); }
   else {
     const w2 = el('div', {class:'tablewrap'});
+    enPer.sort((a, b) => a.fi.ts - b.fi.ts);
     w2.appendChild(el('table', null,
-      el('thead', null, el('tr', null, el('th', null, 'Fecha'), el('th', null, 'Código'), el('th', null, 'Tipo'), el('th', null, 'PK'), el('th', null, 'Medida'), el('th', null, 'Estado'), el('th', null, 'Fecha tomada de'), el('th', null, ''))),
-      el('tbody', null, ...enPer.sort((a, b) => a.fi.ts - b.fi.ts).map(d => {
+      el('thead', null, el('tr', null, selCabecera(enPer.map(d => d.e.id)), el('th', null, 'Fecha'), el('th', null, 'Código'), el('th', null, 'Tipo'), el('th', null, 'PK'), el('th', null, 'Medida'), el('th', null, 'Estado'), el('th', null, 'Fecha tomada de'), el('th', null, ''))),
+      el('tbody', null, ...enPer.map(d => {
         const t = getTipo(d.e.tipoId) || {};
-        return el('tr', null,
+        return selFila(d.e,
           el('td', {style:'white-space:nowrap'}, new Date(d.fi.ts).toLocaleDateString('es-ES')),
           el('td', null, el('code', {class:'pill2'}, d.e.codigo || '—')),
           el('td', null, el('span', {class:'swatch', style:'display:inline-block;margin-right:7px;vertical-align:1px;background:' + (t.color || '#888')}), t.nombre || '—'),
@@ -4344,6 +4495,7 @@ function viewInstalados(c){
     c.appendChild(w2);
   }
   c.appendChild(el('p', {class:'hint'}, 'La fecha de instalación sale de la «Fecha de instalación» del elemento si está rellena; si no, del momento en que su estado pasó a Instalado o Verificado. Para avances antiguos registrados tarde, rellena la «Fecha de instalación».'));
+  if(enPer.length && !fechaVista) c.appendChild(barraSeleccion());
   return c;
 }
 
@@ -4407,7 +4559,7 @@ function repFrases(c){
 }
 function repAmbitoTxt(r){
   const a = r.ambito || {};
-  if(a.tipo === 'estacion') return 'Estación ' + (a.lugar || '—');
+  if(a.tipo === 'estacion') return (a.lugarTipo || 'Estación') + ' ' + (a.lugar || '—');
   if(a.tipo === 'pk') return 'PK ' + (a.pkIni || '?') + ' – ' + (a.pkFin || '?');
   return 'Toda la línea';
 }
@@ -4430,11 +4582,11 @@ function repFormulario(rep){
   const iDes = el('textarea', {rows:'3', placeholder:'Qué se replantea y por qué'}); iDes.value = r.descripcion || '';
   const objs = repObjetivos(); if(r.objetivo && objs.indexOf(r.objetivo) < 0) objs.push(r.objetivo);
   const iObj = el('select', null, ...objs.map(o => el('option', {value:o, ...(o === r.objetivo ? {selected:'selected'} : {})}, o)));
-  const iAmb = el('select', null, ...[['linea', 'Toda la línea'], ['estacion', 'Una estación'], ['pk', 'Tramo de PK']].map(([v, t]) => el('option', {value:v, ...(v === a.tipo ? {selected:'selected'} : {})}, t)));
-  const iLug = el('select', null, ...(lug.length ? lug.map(l => el('option', {value:l.id, ...(l.id === a.lugarId ? {selected:'selected'} : {})}, l.nombre)) : [el('option', {value:''}, 'No hay lugares: créalos en Esquema → Lugares')]));
+  const iAmb = el('select', null, ...[['linea', 'Toda la línea'], ['estacion', 'Un lugar (estación, enclavamiento…)'], ['pk', 'Tramo de PK']].map(([v, t]) => el('option', {value:v, ...(v === a.tipo ? {selected:'selected'} : {})}, t)));
+  const iLug = el('select', null, ...(lug.length ? lug.map(l => el('option', {value:l.id, ...(l.id === a.lugarId ? {selected:'selected'} : {})}, lugarTxt(l))) : [el('option', {value:''}, 'No hay lugares: créalos en Esquema → Lugares')]));
   const iPi = el('input', {type:'text', placeholder:'p. ej. 11,000', value:a.pkIni || ''}), iPf = el('input', {type:'text', placeholder:'p. ej. 11,500', value:a.pkFin || ''});
   const fila = (lab, inp) => el('label', {style:'display:block;margin-bottom:10px'}, el('div', {class:'lab', style:'margin-bottom:4px'}, lab), inp);
-  const bLug = fila('Estación', iLug), bPk = el('div', {style:'display:flex;gap:10px'}, fila('PK desde', iPi), fila('PK hasta', iPf));
+  const bLug = fila('Lugar', iLug), bPk = el('div', {style:'display:flex;gap:10px'}, fila('PK desde', iPi), fila('PK hasta', iPf));
   const vis = () => { bLug.style.display = iAmb.value === 'estacion' ? '' : 'none'; bPk.style.display = iAmb.value === 'pk' ? 'flex' : 'none'; };
   iAmb.addEventListener('change', vis); vis();
   const body = el('div', null, fila('Nombre', iNom), fila('Fecha', iFec), fila('Descripción', iDes), fila('Objetivo del replanteo', iObj), fila('Ámbito', iAmb), bLug, bPk,
@@ -4443,8 +4595,8 @@ function repFormulario(rep){
     const amb = {tipo:iAmb.value};
     if(amb.tipo === 'estacion'){
       const l = lug.find(x => x.id === iLug.value);
-      if(!l){ alert('Elige una estación (hay que crear antes los lugares en el Esquema).'); return false; }
-      Object.assign(amb, {lugarId:l.id, lugar:l.nombre, lugIni:l.pkIni, lugFin:l.pkFin});
+      if(!l){ alert('Elige un lugar (hay que crear antes los lugares en el Esquema).'); return false; }
+      Object.assign(amb, {lugarId:l.id, lugar:l.nombre, lugarTipo:l.tipo, lugIni:l.pkIni, lugFin:l.pkFin});
     }
     if(amb.tipo === 'pk'){
       if(isNaN(pkNum(iPi.value)) || isNaN(pkNum(iPf.value))){ alert('Pon el PK de inicio y de fin del tramo.'); return false; }
@@ -5210,9 +5362,7 @@ function quitarViaDeElementos(num){
     const t = getTipo(e.tipoId); if(!t) return;
     const vr = viaRefDe(t); if(!vr) return;
     if(String(e.valores[vr] || '').trim() !== String(num)) return;
-    e.hist = e.hist || [];
-    e.hist.push({ts:Date.now(), snap:{codigo:e.codigo, valores:clone(e.valores), plano:e.plano ? clone(e.plano) : null}});
-    if(e.hist.length > 40) e.hist.shift();
+    histGuardar(e, Date.now(), 'vía borrada');
     e.valores[vr] = ''; e.modificado = Date.now(); n++;
   });
   if(n){ registrarCambio('vía', 'vía ' + num + ' quitada de ' + n + ' elemento(s)'); save(); }
@@ -5242,7 +5392,7 @@ function nuevaViaModal(existing, pk1, pk2){
   const lugSel = esEdit ? (existing.lugar || 'general') : 'general';
   const selLugar = el('select', null,
     el('option', {value:'general', ...(lugSel === 'general' ? {selected:'selected'} : {})}, 'GENERAL (sin lugar concreto)'),
-    ...lugs.map(l => el('option', {value:l.id, ...(l.id === lugSel ? {selected:'selected'} : {})}, l.nombre)));
+    ...lugs.map(l => el('option', {value:l.id, ...(l.id === lugSel ? {selected:'selected'} : {})}, lugarTxt(l))));
 
   let valA = null, valB = null, valCon = null, valLong = '';
   if(esEdit){
@@ -5349,40 +5499,71 @@ function configVias(){
       el('p', {class:'hint'}, 'Clic en una vía dibujada para editarla o borrarla. Una vía "detectada" se crea sola desde el campo Vía de los elementos: pulsa "Editar" para poder ajustar su número y PKs, o ✕ para quitarla.')
     ), null);
 }
-function nuevoLugarModal(existing){
+function nuevoLugarModal(existing, tipoIni){
   const pr = proyActivo(); pr.lugares = pr.lugares || [];
   const inNom = el('input', {value:existing ? existing.nombre : '', placeholder:'CATOIRA (P2)'});
+  const tipo0 = existing ? (existing.tipo || 'Estación') : (tipoIni || 'Estación');
+  const NUEVO = '__nuevo__';
+  const inTipo = el('select', null, ...tiposLugar().map(t => el('option', {value:t, ...(t === tipo0 ? {selected:'selected'} : {})}, t)), el('option', {value:NUEVO}, 'Otro tipo nuevo…'));
+  inTipo.addEventListener('change', () => {
+    if(inTipo.value !== NUEVO) return;
+    const n = (prompt('Nombre del nuevo tipo de lugar (p. ej. «Subestación»):') || '').trim();
+    if(n && !tiposLugar().includes(n)){ state.tiposLugar = tiposLugar().concat(n); inTipo.insertBefore(el('option', {value:n}, n), inTipo.lastChild); }
+    inTipo.value = n || tipo0;
+  });
   const inA = el('input', {value:existing ? toPkStr(existing.pkIni) : '', placeholder:'8+900'});
   const inB = el('input', {value:existing ? toPkStr(existing.pkFin) : '', placeholder:'9+900'});
   openModal(existing ? 'Editar lugar' : 'Nuevo lugar',
     el('div', null,
-      el('div', {class:'field'}, el('span', {class:'flab'}, 'Nombre'), inNom),
+      el('div', {class:'cols2'},
+        el('div', {class:'field'}, el('span', {class:'flab'}, 'Nombre'), inNom),
+        el('div', {class:'field'}, el('span', {class:'flab'}, 'Tipo de lugar'), inTipo)),
       el('div', {class:'cols2'},
         el('div', {class:'field'}, el('span', {class:'flab'}, 'PK inicio'), inA),
         el('div', {class:'field'}, el('span', {class:'flab'}, 'PK fin'), inB)),
-      el('p', {class:'hint', style:'margin-top:0'}, 'Cualquier elemento cuyo PK caiga entre estos dos valores se considera de este lugar.')
+      el('p', {class:'hint', style:'margin-top:0'}, 'Cualquier elemento cuyo PK caiga entre estos dos valores se considera de este lugar. Lugares de distinto tipo pueden solaparse: una señal puede ser de una estación y de un enclavamiento a la vez. Lo que no tiene PK (tarjetas) se asigna en su ficha.')
     ),
     () => {
       const nom = inNom.value.trim(); if(!nom){ alert('Pon un nombre.'); return false; }
       const a = pkNum(inA.value), b = pkNum(inB.value);
       if(isNaN(a) || isNaN(b)){ alert('Pon PK inicio y fin válidos.'); return false; }
-      if(existing){ existing.nombre = nom; existing.pkIni = Math.min(a, b); existing.pkFin = Math.max(a, b); registrarCambio('lugar', 'editado lugar "' + nom + '"'); }
-      else { pr.lugares.push({id:uid(), nombre:nom, pkIni:Math.min(a, b), pkFin:Math.max(a, b)}); registrarCambio('lugar', 'añadido lugar "' + nom + '" (' + toPkStr(Math.min(a, b)) + '–' + toPkStr(Math.max(a, b)) + ')'); }
+      const tipo = inTipo.value && inTipo.value !== NUEVO ? inTipo.value : tipo0;
+      if(pr.lugares.some(l => l !== existing && l.tipo === tipo && l.nombre.trim().toLowerCase() === nom.toLowerCase())){ alert('Ya hay un lugar de tipo ' + tipo.toLowerCase() + ' que se llama así.'); return false; }
+      if(existing){
+        const antes = existing.nombre;
+        existing.nombre = nom; existing.tipo = tipo; existing.pkIni = Math.min(a, b); existing.pkFin = Math.max(a, b);
+        if(antes !== nom) renombrarLugarEnElementos(pr, antes, nom, tipo);
+        registrarCambio('lugar', 'editado lugar "' + nom + '" (' + tipo + ')');
+      }
+      else { pr.lugares.push({id:uid(), nombre:nom, tipo, pkIni:Math.min(a, b), pkFin:Math.max(a, b)}); registrarCambio('lugar', 'añadido lugar "' + nom + '" (' + tipo + ', ' + toPkStr(Math.min(a, b)) + '–' + toPkStr(Math.max(a, b)) + ')'); }
       save(); render();
     },
     existing ? () => { pr.lugares = pr.lugares.filter(x => x.id !== existing.id); registrarCambio('lugar', 'borrado lugar "' + existing.nombre + '"'); save(); render(); } : null
   );
 }
+/* los campos de tipo «Lugar» guardan el nombre: al renombrar el lugar se cambia en los elementos */
+function renombrarLugarEnElementos(pr, antes, despues, tipo){
+  const a = antes.trim().toLowerCase();
+  state.elementos.forEach(e => {
+    if(e.proyectoId !== pr.id) return;
+    const t = getTipo(e.tipoId); if(!t) return;
+    t.campos.forEach(r => { const c = getCampo(r.campoId);
+      if(c && c.tipo === 'lugar' && (!c.lugarTipo || c.lugarTipo === tipo) && vStr(e.valores[r.campoId]).trim().toLowerCase() === a) e.valores[r.campoId] = despues; });
+  });
+}
 function configLugares(){
-  const pr = proyActivo();
-  openModal('Lugares (' + (pr.lugares || []).length + ')',
+  const pr = proyActivo(), lugs = pr.lugares || [];
+  const tipos = [...new Set(tiposLugar().concat(lugs.map(l => l.tipo)))].filter(t => lugs.some(l => l.tipo === t));
+  openModal('Lugares (' + lugs.length + ')',
     el('div', null,
-      (pr.lugares || []).length ? el('div', {class:'list'}, ...pr.lugares.slice().sort((a, b) => a.pkIni - b.pkIni).map(l =>
-        el('div', {class:'row pick', onclick:() => { closeModal(); nuevoLugarModal(l); }},
-          el('span', {class:'grow'}, l.nombre, ' ', el('span', {style:'color:var(--tx3)'}, toPkStr(l.pkIni) + '–' + toPkStr(l.pkFin)))
-        ))) : el('div', {class:'empty'}, 'Ningún lugar definido.'),
+      lugs.length ? el('div', null, ...tipos.map(tp => el('div', {style:'margin-bottom:12px'},
+        el('div', {class:'flab', style:'font-size:12px;color:var(--tx2);font-weight:700;margin-bottom:6px'}, tp),
+        el('div', {class:'list'}, ...lugs.filter(l => l.tipo === tp).sort((a, b) => a.pkIni - b.pkIni).map(l =>
+          el('div', {class:'row pick', onclick:() => { closeModal(); nuevoLugarModal(l); }},
+            el('span', {class:'grow'}, l.nombre, ' ', el('span', {style:'color:var(--tx3)'}, toPkStr(l.pkIni) + '–' + toPkStr(l.pkFin))),
+            el('span', {class:'count'}, elementosProy().filter(e => lugaresDe(e).includes(l)).length + ' elem.'))))))) : el('div', {class:'empty'}, 'Ningún lugar definido.'),
       el('div', {style:'margin-top:10px'}, el('button', {class:'btn sm', onclick:() => { closeModal(); nuevoLugarModal(null); }}, '+ Nuevo lugar')),
-      el('p', {class:'hint'}, 'Un lugar es un tramo de PK con nombre (una estación, un tramo…). Se usa para filtrar en Base de datos y para acotar el Esquema.')
+      el('p', {class:'hint'}, 'Un lugar es un tramo de PK con nombre y tipo (estación, enclavamiento, trayecto…). Se usa para filtrar en Base de datos, como columna y para acotar el Esquema.')
     ), null);
 }
 /* ---- Andenes: figura de ancho variable al lateral de una vía (PK inicio→fin con varios puntos {PK, ancho}) ---- */
@@ -5840,7 +6021,8 @@ function viewEsquema(){
 
   const datos = els.map(e => ({e, p:elemPK(e), via:viaDe(e)}));
   const conPk = datos.filter(d => !isNaN(d.p.pu) || (!isNaN(d.p.ini) && !isNaN(d.p.fin)));
-  const sinPk = datos.filter(d => conPk.indexOf(d) < 0);
+  /* los tipos sin campo de PK (tarjetas) no van al esquema ni a la lista «Sin PK» */
+  const sinPk = datos.filter(d => conPk.indexOf(d) < 0 && tipoConPk(getTipo(d.e.tipoId)));
 
   const tb = el('div', {class:'pdf-toolbar'});
   tb.appendChild(el('span', {style:'font-weight:600'}, proyActivo().nombre));
@@ -5868,7 +6050,8 @@ function viewEsquema(){
     tb2.appendChild(el('button', {class:'btn sm', onclick:() => configAndenes()}, 'Andenes (' + (proyActivo().andenes || []).length + ')'));
     if(lugares.length) tb2.appendChild(el('select', {style:'width:auto', onchange:e => { esqLugar = e.target.value || null; esqZoom = null; esqSoltarAncla(); render(); }},
       el('option', {value:''}, 'Todo el proyecto'),
-      ...lugares.map(l => el('option', {value:l.id, ...(l.id === esqLugar ? {selected:'selected'} : {})}, l.nombre))));
+      ...[...new Set(lugares.map(l => l.tipo))].map(tp => el('optgroup', {label:tp},
+        ...lugares.filter(l => l.tipo === tp).map(l => el('option', {value:l.id, ...(l.id === esqLugar ? {selected:'selected'} : {})}, l.nombre))))));
     tb2.appendChild(btnFiltros(elsAll, tiposPresentes));
     if(hayFiltrosActivos()) tb2.appendChild(el('button', {class:'btn sm', onclick:() => { limpiarFiltros(); render(); }}, '✕ Filtros'));
     tb2.appendChild(el('span', {class:'spacer'}));
@@ -5953,8 +6136,8 @@ function viewEsquema(){
   }, {passive:false});
   cont.appendChild(holder);
 
-  const sinUb = els.filter(e => !(e.plano && e.plano.x != null) && isNaN(firstPk(e)));
-  const trasCal = els.filter(e => !posPlano(e, cal, esqPage, 0));
+  const sinUb = els.filter(e => !(e.plano && e.plano.x != null) && isNaN(firstPk(e)) && tipoConPk(getTipo(e.tipoId)));
+  const trasCal = els.filter(e => !posPlano(e, cal, esqPage, 0) && tipoConPk(getTipo(e.tipoId)));
   const tray = [...new Set(sinUb.concat(trasCal))];
   if(tray.length){
     const ch = el('div', {class:'chips'});
@@ -6039,9 +6222,7 @@ async function renderEsqPdf(pack){
       if(soloLectura()){ esqColocar = null; render(); return; }
       const e = state.elementos.find(x => x.id === esqColocar);
       if(e){
-        e.hist = e.hist || [];
-        e.hist.push({ts:Date.now(), snap:{codigo:e.codigo, valores:clone(e.valores), plano:e.plano ? clone(e.plano) : null}});
-        if(e.hist.length > 40) e.hist.shift();
+        histGuardar(e, Date.now(), 'plano PDF');
         e.plano = {page:esqPage, x:px, y:py};
         const ref = pkRefDe(getTipo(e.tipoId));
         if(ref && cal && isNaN(firstPk(e))) e.valores[ref] = toPkStr(cal.inv(px));
@@ -6692,9 +6873,7 @@ function esquemaCanvas(conPk, sinPk, elsAll){
       const t = getTipo(el0.tipoId);
       let pk = pkEn(e.clientX); pk = Math.max(mn, Math.min(mx, pk));
       const via = viaEn(e.clientY);
-      el0.hist = el0.hist || [];
-      el0.hist.push({ts:Date.now(), snap:{codigo:el0.codigo, valores:clone(el0.valores), plano:el0.plano ? clone(el0.plano) : null}});
-      if(el0.hist.length > 40) el0.hist.shift();
+      histGuardar(el0, Date.now(), 'esquema');
       const p = elemPK(el0);
       if(!isNaN(p.ini) && !isNaN(p.fin)){
         const len = p.fin - p.ini;
@@ -6828,7 +7007,8 @@ function bdColsDisponibles(){
   const fijas = [
     {k:'codigo', lbl:'Código'}, {k:'tipo', lbl:'Tipo'}, {k:'pk', lbl:'PK'},
     {k:'estado', lbl:'Estado'}, {k:'contr', lbl:'Contratista'}, {k:'via', lbl:'Vía'},
-    {k:'lugar', lbl:'Lugar'}, {k:'mod', lbl:'Modificado'}, {k:'creado', lbl:'Creado'}
+    {k:'lugar', lbl:'Lugar (todos)'}, ...tiposLugar().map(t => ({k:'lugar:' + t, lbl:'Lugar · ' + t})),
+    {k:'docs', lbl:'Documentos'}, {k:'mod', lbl:'Modificado'}, {k:'creado', lbl:'Creado'}
   ];
   const campos = state.campos.map(c => ({k:'campo:' + c.id, lbl:c.etiqueta}));
   return fijas.concat(campos);
@@ -6938,17 +7118,22 @@ function editarCampo(id, tipoParaAnadir){
   const inTipo = el('select', null, ...PRIMITIVOS.map(p => el('option', {value:p.id, ...(p.id === cp.tipo ? {selected:'selected'} : {})}, p.nombre)));
   const inOpc = el('textarea', {rows:5, placeholder:'Una opción por línea'}, cp.opciones.join('\n'));
   const opcWrap = el('div', {class:'field', style:cp.tipo === 'select' ? '' : 'display:none'}, el('span', {class:'flab'}, 'Opciones de la lista'), inOpc);
-  inTipo.addEventListener('change', () => { opcWrap.style.display = inTipo.value === 'select' ? '' : 'none'; });
+  const inLugT = el('select', null, el('option', {value:''}, 'Cualquier tipo'),
+    ...tiposLugar().map(t => el('option', {value:t, ...(t === cp.lugarTipo ? {selected:'selected'} : {})}, t)));
+  const lugWrap = el('div', {class:'field', style:cp.tipo === 'lugar' ? '' : 'display:none'}, el('span', {class:'flab'}, 'Lugares que se pueden elegir'), inLugT,
+    el('p', {class:'hint'}, 'El elemento pasa a ser de ese lugar aunque no tenga PK (p. ej. una tarjeta de un enclavamiento).'));
+  inTipo.addEventListener('change', () => { opcWrap.style.display = inTipo.value === 'select' ? '' : 'none'; lugWrap.style.display = inTipo.value === 'lugar' ? '' : 'none'; });
   openModal(esNuevo ? 'Nuevo campo' : 'Editar campo',
     el('div', null,
       el('div', {class:'field'}, el('span', {class:'flab'}, 'Etiqueta'), inEtq),
       el('div', {class:'field'}, el('span', {class:'flab'}, 'Tipo de campo'), inTipo),
-      opcWrap
+      opcWrap, lugWrap
     ),
     () => {
       cp.etiqueta = inEtq.value.trim();
       cp.tipo = inTipo.value;
       cp.opciones = inTipo.value === 'select' ? inOpc.value.split('\n').map(s => s.trim()).filter(Boolean) : [];
+      if(cp.tipo === 'lugar' && inLugT.value) cp.lugarTipo = inLugT.value; else delete cp.lugarTipo;
       if(!cp.etiqueta){ alert('Pon una etiqueta.'); return false; }
       const ex = state.campos.find(c => c.id === cp.id);
       if(ex) Object.assign(ex, cp); else state.campos.push(cp);
@@ -7025,7 +7210,13 @@ function pasaFiltros(e){
   if(!filtroVis.size) return true;
   if(filtroVis.has('t:' + e.tipoId)) return false;
   if(filtroVis.has('e:' + (valorEstado(e) || '∅'))) return false;
-  if(filtroVis.has('l:' + ((lugarDe(e) || {}).id || '∅'))) return false;
+  if(filtroVis.size && [...filtroVis].some(k => k.indexOf('l:') === 0)){
+    const ls = lugaresDe(e);
+    for(const tp of tiposLugar()){
+      const l = ls.find(x => x.tipo === tp);
+      if(filtroVis.has(l ? 'l:' + l.id : 'l:∅:' + tp)) return false;
+    }
+  }
   const t = getTipo(e.tipoId); if(!t) return true;
   let key = 'v:' + e.tipoId;
   for(const c of camposFiltroDeTipo(t)){
@@ -7075,11 +7266,11 @@ function panelFiltros(base, tiposPresentes){
       body.appendChild(el('div', {class:'flab', style:'margin-top:12px'}, 'Estado'));
       estados.forEach(s => body.appendChild(chk('e:' + s, s, 0)));
     }
-    if(lug.length){
-      body.appendChild(el('div', {class:'flab', style:'margin-top:12px'}, 'Lugar'));
-      lug.forEach(l => body.appendChild(chk('l:' + l.id, l.nombre, 0)));
-      body.appendChild(chk('l:∅', '(sin lugar)', 0));
-    }
+    [...new Set(lug.map(l => l.tipo))].forEach(tp => {
+      body.appendChild(el('div', {class:'flab', style:'margin-top:12px'}, 'Lugar · ' + tp));
+      lug.filter(l => l.tipo === tp).forEach(l => body.appendChild(chk('l:' + l.id, l.nombre, 0)));
+      body.appendChild(chk('l:∅:' + tp, '(sin ' + tp.toLowerCase() + ')', 0));
+    });
   }
   pinta();
   openModal('Filtros', body, null);
@@ -7125,7 +7316,7 @@ function viewBD(){
   }
 
   let cols = (state.bdCols && state.bdCols.length ? state.bdCols.slice() : ['codigo', 'tipo', 'pk', 'estado']);
-  if(!lugares.length) cols = cols.filter(k => k !== 'lugar');
+  if(!lugares.length) cols = cols.filter(k => k !== 'lugar' && k.indexOf('lugar:') !== 0);
   const sd = bdColDef(bdSort.col);
   const kf = sd.sort || (e => (e.codigo || '').toLowerCase());
   filas.sort((a, b) => {
@@ -7141,15 +7332,21 @@ function viewBD(){
       render();
     }}, label, el('span', {class:'arw'}, bdSort.col === col ? (bdSort.dir > 0 ? '▲' : '▼') : '⇅'));
 
+  const conSel = !fechaVista;
   const wrap = el('div', {class:'tablewrap'});
   wrap.appendChild(el('table', null,
-    el('thead', null, el('tr', null, ...cols.map(k => thS(bdColDef(k).lbl, k)), el('th', null, ''))),
-    el('tbody', null, ...filas.map(e => el('tr', null,
-      ...cols.map(k => { const d = bdColDef(k); return d.node ? d.node(e) : el('td', d.muted ? {style:'color:var(--tx3);font-size:12px'} : null, d.get(e)); }),
-      el('td', null, el('button', {class:'btn sm', onclick:() => nuevoElemento(e.id)}, 'Abrir'))
-    )))
+    el('thead', null, el('tr', null, conSel ? selCabecera(filas.map(e => e.id)) : null, ...cols.map(k => thS(bdColDef(k).lbl, k)), el('th', null, ''))),
+    el('tbody', null, ...filas.map(e => {
+      const celdas = [...cols.map(k => { const d = bdColDef(k); return d.node ? d.node(e) : el('td', d.muted ? {style:'color:var(--tx3);font-size:12px'} : null, d.get(e)); }),
+        el('td', null, el('button', {class:'btn sm', onclick:() => nuevoElemento(e.id)}, 'Abrir'))];
+      return conSel ? selFila(e, ...celdas) : el('tr', null, ...celdas);
+    }))
   ));
   cont.appendChild(wrap);
+  if(conSel){
+    cont.appendChild(el('p', {class:'hint'}, 'Marca varios con las casillas (Mayús+clic marca un tramo) para cambiarles el estado, la certificación u otro campo de una vez.'));
+    cont.appendChild(barraSeleccion());
+  }
   return cont;
 }
 function bdColDef(k){
@@ -7163,17 +7360,919 @@ function bdColDef(k){
               sort:e => valorEstado(e).toLowerCase()},
     contr:  {lbl:'Contratista', get:e => valorPorEtiqueta(e, 'Contratista') || '—', sort:e => valorPorEtiqueta(e, 'Contratista').toLowerCase()},
     via:    {lbl:'Vía', get:e => viaDe(e) || '—', sort:e => String(viaDe(e) || '').toLowerCase()},
-    lugar:  {lbl:'Lugar', get:e => (lugarDe(e) || {}).nombre || '—', sort:e => ((lugarDe(e) || {}).nombre || '').toLowerCase(), muted:true},
+    lugar:  {lbl:'Lugar', get:e => lugaresDe(e).map(l => l.nombre).join(' · ') || '—', sort:e => lugaresDe(e).map(l => l.nombre).join(' ').toLowerCase(), muted:true},
     mod:    {lbl:'Modificado', get:e => e.modificado ? new Date(e.modificado).toLocaleDateString() : '—', sort:e => e.modificado || 0, muted:true},
-    creado: {lbl:'Creado', get:e => e.creado ? new Date(e.creado).toLocaleDateString() : '—', sort:e => e.creado || 0, muted:true}
+    creado: {lbl:'Creado', get:e => e.creado ? new Date(e.creado).toLocaleDateString() : '—', sort:e => e.creado || 0, muted:true},
+    docs:   {lbl:'Docs', node:e => { const ds = docsDe(e); return el('td', {title:ds.map(d => d.nombre).join('\n')}, ds.length ? el('span', {class:'pill blue'}, String(ds.length)) : '—'); }, sort:e => docsDe(e).length}
   };
   if(F[k]) return F[k];
+  if(k && k.indexOf('lugar:') === 0){
+    const tp = k.slice(6);
+    return {lbl:tp, get:e => (lugarDe(e, tp) || {}).nombre || '—', sort:e => ((lugarDe(e, tp) || {}).nombre || '').toLowerCase(), muted:true};
+  }
   if(k && k.indexOf('campo:') === 0){
     const id = k.slice(6), c = getCampo(id) || {etiqueta:'?'};
     const fmt = c.tipo === 'focos' ? (v => focosResumen(v) || '—') : (v => v || '—');
     return {lbl:c.etiqueta, get:e => fmt(e.valores && e.valores[id]), sort:e => String((e.valores && e.valores[id]) || '').toLowerCase(), muted:true};
   }
   return {lbl:k || '', get:() => '—', sort:() => ''};
+}
+
+/* ================= documentos y certificados vinculables ================= */
+/* Un documento (certificado, informe de pruebas, acta…) es una ficha del proyecto con su archivo
+   o un enlace, vinculada a los elementos que hagan falta: el informe de pruebas de una tirada de
+   tarjetas se vincula a todas ellas. En proyecto.json va solo la ficha (p.documentos); el archivo
+   se guarda en este navegador (IndexedDB: localStorage no da para PDFs) y, con la sincronización
+   activa, en la carpeta documentos/ del repositorio de datos, de donde lo bajan los demás
+   dispositivos la primera vez que lo abren. */
+const TIPOS_DOC_DEF = ['Certificado', 'Informe de pruebas', 'Acta', 'Albarán', 'Plano', 'Otro'];
+const tiposDoc = () => (state.tiposDoc && state.tiposDoc.length) ? state.tiposDoc : TIPOS_DOC_DEF;
+const DOC_MAX = 25 * 1024 * 1024;
+let docSel = null, docFiltroTipo = '';
+const docsProy = pr => ((pr || proyActivo()).documentos || []);
+const docsDe = e => docsProy(state.proyectos.find(p => p.id === e.proyectoId)).filter(d => d.elementos && d.elementos[e.id]);
+const docElems = d => Object.keys(d.elementos || {}).map(id => state.elementos.find(e => e.id === id && !e.borrado)).filter(Boolean);
+const fmtTam = b => b >= 1048576 ? fmtNum(b / 1048576) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
+const docRuta = a => 'documentos/' + a.hash + (a.ext ? '.' + a.ext : '');
+const docFecha = d => d.fecha ? new Date(d.fecha + 'T12:00:00').toLocaleDateString('es-ES') : '';
+/* --- carpetas y subcarpetas --- */
+/* Solo ordenan la lista: p.carpetasDoc = [{id, nombre, padre}] y d.carpeta = id (vacío, o una
+   carpeta que ya no existe, es la raíz). El archivo sigue en documentos/<hash> del repositorio, así
+   que crear, renombrar o mover carpetas no sube nada más que proyecto.json. */
+let docCarpeta = '', docConSub = false;
+const docMarcados = new Set();
+const carpetasProy = pr => ((pr || proyActivo()).carpetasDoc || []);
+const carpetaDe = (pr, id) => (id && carpetasProy(pr).find(c => c.id === id)) || null;
+const padreDe = (pr, c) => carpetaDe(pr, c.padre) ? c.padre : '';
+const docEnCarpeta = (pr, d) => carpetaDe(pr, d.carpeta) ? d.carpeta : '';
+function carpetaHijas(pr, padre){
+  return carpetasProy(pr).filter(c => padreDe(pr, c) === (padre || '')).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es', {numeric:true}));
+}
+function carpetaRuta(pr, id){ const out = []; for(let c = carpetaDe(pr, id), n = 0; c && n < 50; c = carpetaDe(pr, c.padre), n++) out.unshift(c); return out; }
+const carpetaTxt = (pr, id) => carpetaRuta(pr, id).map(c => c.nombre).join(' / ') || 'Documentos';
+/* la carpeta y todas las que cuelgan de ella ('' = todo el proyecto) */
+function carpetaRama(pr, id){
+  const out = new Set([id || '']);
+  for(let mas = true; mas;){ mas = false; carpetasProy(pr).forEach(c => { if(!out.has(c.id) && out.has(padreDe(pr, c))){ out.add(c.id); mas = true; } }); }
+  return out;
+}
+/* <option> de todas las carpetas, sangradas como el árbol. `sin`: las que no se pueden elegir
+   (al mover una carpeta, ella misma y lo que cuelga de ella) */
+function carpetaOpciones(pr, val, sin){
+  const out = [el('option', {value:'', ...(val === '' ? {selected:'selected'} : {})}, 'Documentos (raíz)')];
+  const rec = (padre, niv) => { if(niv > 50) return; carpetaHijas(pr, padre).forEach(c => {
+    if(sin && sin.has(c.id)) return;
+    out.push(el('option', {value:c.id, ...(c.id === val ? {selected:'selected'} : {})}, '   '.repeat(niv) + c.nombre));
+    rec(c.id, niv + 1);
+  }); };
+  rec('', 1);
+  return out;
+}
+/* los documentos de un desplegable, agrupados por carpeta si hay más de una */
+function docOpciones(pr, docs){
+  const txt = d => d.nombre + ' · ' + (d.tipo || '') + (d.fecha ? ' · ' + docFecha(d) : '');
+  const grupos = new Map();
+  docs.forEach(d => { const k = docEnCarpeta(pr, d); if(!grupos.has(k)) grupos.set(k, []); grupos.get(k).push(d); });
+  if(grupos.size === 1 && grupos.has('')) return docs.map(d => el('option', {value:d.id}, txt(d)));
+  return [...grupos.keys()].sort((a, b) => (a ? carpetaTxt(pr, a) : '').localeCompare(b ? carpetaTxt(pr, b) : '', 'es', {numeric:true}))
+    .map(k => el('optgroup', {label:k ? carpetaTxt(pr, k) : 'Sin carpeta'}, ...grupos.get(k).map(d => el('option', {value:d.id}, txt(d)))));
+}
+const nombreCarpetaLibre = (pr, padre, n, salvo) => !carpetaHijas(pr, padre).some(c => c !== salvo && c.nombre.toLowerCase() === n.toLowerCase());
+const icoCarpeta = () => el('span', {class:'icarp', html:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/></svg>'});
+/* crear (c = null, dentro de `padre`) o renombrar / mover / borrar una carpeta */
+function carpetaFormulario(c, padre){
+  if(soloLectura()) return;
+  const pr = proyActivo();
+  const rama = c ? carpetaRama(pr, c.id) : null;
+  const iNom = el('input', {value:c ? c.nombre : '', placeholder:'Pruebas de tarjetas'});
+  const iPadre = el('select', null, ...carpetaOpciones(pr, c ? padreDe(pr, c) : (carpetaDe(pr, padre) ? padre : ''), rama));
+  const nDocs = c ? docsProy(pr).filter(d => rama.has(docEnCarpeta(pr, d))).length : 0;
+  openModal(c ? 'Carpeta «' + c.nombre + '»' : 'Carpeta nueva',
+    el('div', null,
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Nombre'), iNom),
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Dentro de'), iPadre),
+      c ? el('p', {class:'hint'}, nDocs ? 'Tiene ' + nDocs + ' documento' + (nDocs === 1 ? '' : 's') + ' contando sus subcarpetas. Si la borras, su contenido pasa a la carpeta de arriba: no se borra ningún documento.' : 'Está vacía.') : null),
+    () => {
+      const n = iNom.value.trim(), p = iPadre.value;
+      if(!n){ alert('Pon un nombre.'); return false; }
+      if(/[\/\\]/.test(n)){ alert('El nombre no puede llevar «/» ni «\\».'); return false; }
+      if(!nombreCarpetaLibre(pr, p, n, c)){ alert('Ya hay una carpeta «' + n + '» en «' + carpetaTxt(pr, p) + '».'); return false; }
+      if(c){
+        if(c.nombre === n && padreDe(pr, c) === p) return;
+        const antes = carpetaTxt(pr, c.id);
+        c.nombre = n; c.padre = p;
+        registrarCambio('documento', 'Carpeta «' + antes + '» → «' + carpetaTxt(pr, c.id) + '»');
+      } else {
+        const nc = {id:uid(), nombre:n, padre:p};
+        pr.carpetasDoc = carpetasProy(pr).concat(nc);
+        registrarCambio('documento', 'Carpeta nueva «' + carpetaTxt(pr, nc.id) + '»');
+      }
+      save(); render();
+    },
+    c ? () => carpetaBorrar(c) : null);
+  setTimeout(() => iNom.focus(), 30);
+}
+/* borrar una carpeta: sus documentos y subcarpetas suben a la carpeta de arriba */
+function carpetaBorrar(c){
+  const pr = proyActivo(), padre = padreDe(pr, c);
+  const docs = docsProy(pr).filter(d => docEnCarpeta(pr, d) === c.id), subs = carpetaHijas(pr, c.id);
+  const dest = carpetaTxt(pr, padre), ruta = carpetaTxt(pr, c.id);
+  const que = [docs.length ? docs.length + ' documento' + (docs.length === 1 ? '' : 's') : '', subs.length ? subs.length + ' subcarpeta' + (subs.length === 1 ? '' : 's') : ''].filter(Boolean).join(' y ');
+  if(!confirm('¿Borrar la carpeta «' + ruta + '»?' + (que ? ' Lo que tiene (' + que + ') pasa a «' + dest + '». No se borra ningún documento.' : ''))) return false;
+  docs.forEach(d => { d.carpeta = padre; });
+  subs.forEach(s => {
+    s.padre = padre;
+    /* si arriba ya hay una carpeta con ese nombre, se le añade un número */
+    if(!nombreCarpetaLibre(pr, padre, s.nombre, s)){ const base = s.nombre; let i = 2; while(!nombreCarpetaLibre(pr, padre, base + ' (' + i + ')', s)) i++; s.nombre = base + ' (' + i + ')'; }
+  });
+  pr.carpetasDoc = carpetasProy(pr).filter(x => x !== c);
+  if(docCarpeta === c.id) docCarpeta = padre;
+  registrarCambio('documento', 'Carpeta borrada «' + ruta + '»' + (que ? '; lo que tenía (' + que + ') pasa a «' + dest + '»' : ''));
+  save(); render();
+}
+function docMover(ids, destino){
+  if(soloLectura()) return 0;
+  const pr = proyActivo(), dest = carpetaDe(pr, destino) ? destino : '';
+  const ds = docsProy(pr).filter(d => ids.includes(d.id) && docEnCarpeta(pr, d) !== dest);
+  if(!ds.length) return 0;
+  const ts = Date.now();
+  ds.forEach(d => { d.carpeta = dest; d.modificado = ts; });
+  registrarCambio('documento', (ds.length === 1 ? 'Movido «' + ds[0].nombre + '»' : 'Movidos ' + ds.length + ' documentos') + ' a «' + carpetaTxt(pr, dest) + '»');
+  save();
+  return ds.length;
+}
+function carpetaMover(c, destino){
+  if(soloLectura()) return false;
+  const pr = proyActivo(), dest = carpetaDe(pr, destino) ? destino : '';
+  if(padreDe(pr, c) === dest) return false;
+  if(carpetaRama(pr, c.id).has(dest)){ alert('No se puede meter una carpeta dentro de sí misma.'); return false; }
+  if(!nombreCarpetaLibre(pr, dest, c.nombre, c)){ alert('Ya hay una carpeta «' + c.nombre + '» en «' + carpetaTxt(pr, dest) + '».'); return false; }
+  const antes = carpetaTxt(pr, c.id);
+  c.padre = dest;
+  registrarCambio('documento', 'Carpeta «' + antes + '» movida a «' + carpetaTxt(pr, dest) + '»');
+  save();
+  return true;
+}
+/* arrastrar documentos (todos los marcados si el arrastrado lo está) o carpetas sobre una carpeta */
+let docArrastre = null;   /* {docs:[ids]} o {carpeta:id} */
+function arrastrable(n, dato){
+  if(fechaVista) return n;
+  n.setAttribute('draggable', 'true');
+  n.addEventListener('dragstart', ev => { docArrastre = dato(); if(ev.dataTransfer){ ev.dataTransfer.effectAllowed = 'move'; try{ ev.dataTransfer.setData('text/plain', 'via-doc'); }catch(e){} } });
+  n.addEventListener('dragend', () => { docArrastre = null; document.querySelectorAll('.dropok').forEach(x => x.classList.remove('dropok')); });
+  return n;
+}
+function destinoCarpeta(n, id){
+  if(fechaVista) return n;
+  n.addEventListener('dragover', ev => { if(!docArrastre) return; ev.preventDefault(); if(ev.dataTransfer) ev.dataTransfer.dropEffect = 'move'; n.classList.add('dropok'); });
+  n.addEventListener('dragleave', () => n.classList.remove('dropok'));
+  n.addEventListener('drop', ev => {
+    const a = docArrastre; docArrastre = null; n.classList.remove('dropok');
+    if(!a) return;
+    ev.preventDefault(); ev.stopPropagation();
+    if(a.carpeta){ const c = carpetaDe(proyActivo(), a.carpeta); if(c && carpetaMover(c, id)) render(); }
+    else if(a.docs && docMover(a.docs, id)){ a.docs.forEach(x => docMarcados.delete(x)); render(); }
+  });
+  return n;
+}
+/* documentos marcados en la lista: barra para moverlos de carpeta */
+function docMarcadosVigentes(pr){ const ids = new Set(docsProy(pr).map(d => d.id)); [...docMarcados].forEach(id => { if(!ids.has(id)) docMarcados.delete(id); }); return docMarcados; }
+function docBarra(){
+  const pr = proyActivo(), n = docMarcadosVigentes(pr).size;
+  if(!n || fechaVista) return el('div', {id:'docbar', style:'display:none'});
+  const iDest = el('select', {title:'Mover los documentos marcados', onchange:ev => {
+    const v = ev.target.value; if(v === '__') return;
+    const m = docMover([...docMarcados], v);
+    docMarcados.clear(); render();
+    if(!m) alert('Ya estaban en esa carpeta.');
+  }}, el('option', {value:'__', selected:'selected'}, 'Mover a carpeta…'), ...carpetaOpciones(pr, '__'));
+  return el('div', {class:'selbar', id:'docbar'},
+    el('span', {class:'n'}, n + (n === 1 ? ' documento marcado' : ' documentos marcados')),
+    iDest,
+    el('span', {class:'spacer'}),
+    el('button', {class:'btn sm', onclick:() => { docMarcados.clear(); docSelRefrescar(); }}, '✕ Quitar selección'));
+}
+/* repinta casillas y barra sin re-renderizar; `raiz`: la vista aún sin colgar del documento */
+function docSelRefrescar(raiz){
+  const r = raiz || document;
+  let vis = 0, on = 0;
+  r.querySelectorAll('tr[data-doc]').forEach(tr => {
+    const m = docMarcados.has(tr.getAttribute('data-doc'));
+    tr.classList.toggle('selr', m);
+    const cb = /** @type {HTMLInputElement} */ (tr.querySelector('td.dselc input')); if(cb) cb.checked = m;
+    if(/** @type {HTMLElement} */ (tr).style.display !== 'none'){ vis++; if(m) on++; }
+  });
+  const hd = /** @type {HTMLInputElement} */ (r.querySelector('th.dselc input'));
+  if(hd){ hd.checked = vis > 0 && on === vis; hd.indeterminate = on > 0 && on < vis; }
+  const vieja = r.querySelector('#docbar');
+  if(vieja) vieja.replaceWith(docBarra());
+}
+/* --- almacén local (IndexedDB) --- */
+let _docsDb = null;
+function docsDb(){
+  if(!_docsDb) _docsDb = new Promise((res, rej) => {
+    if(typeof indexedDB === 'undefined'){ rej(new Error('este navegador no permite guardar archivos')); return; }
+    const rq = indexedDB.open('via-documentos', 1);
+    rq.onupgradeneeded = () => rq.result.createObjectStore('archivos');
+    rq.onsuccess = () => res(rq.result);
+    rq.onerror = () => rej(rq.error);
+  }).catch(e => { _docsDb = null; throw e; });
+  return _docsDb;
+}
+async function docGuardarLocal(hash, blob){
+  const db = await docsDb();
+  return new Promise((res, rej) => { const tx = db.transaction('archivos', 'readwrite'); tx.objectStore('archivos').put(blob, hash); tx.oncomplete = () => res(true); tx.onerror = () => rej(tx.error); });
+}
+async function docLeerLocal(hash){
+  const db = await docsDb();
+  return new Promise((res, rej) => { const rq = db.transaction('archivos').objectStore('archivos').get(hash); rq.onsuccess = () => res(rq.result || null); rq.onerror = () => rej(rq.error); });
+}
+async function hashArchivo(buf){
+  if(crypto.subtle){ const d = await crypto.subtle.digest('SHA-256', buf); return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 40); }
+  return uid().replace(/-/g, '');
+}
+const blobB64 = blob => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).replace(/^data:[^,]*,/, '')); r.onerror = () => rej(r.error); r.readAsDataURL(blob); });
+function b64Blob(b64, mime){ const bin = atob(b64), u = new Uint8Array(bin.length); for(let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return new Blob([u], {type:mime || 'application/octet-stream'}); }
+/* --- en el repositorio de datos --- */
+const docsSubidosKey = () => 'vs-gh-docs:' + GH.repo + '@' + GH.branch;
+function docsSubidos(){ try{ return new Set(JSON.parse(localStorage.getItem(docsSubidosKey()) || '[]')); }catch(e){ return new Set(); } }
+function marcarSubido(hash){ const s = docsSubidos(); if(s.has(hash)) return; s.add(hash); try{ localStorage.setItem(docsSubidosKey(), JSON.stringify([...s])); }catch(e){} }
+/* sube los archivos que estén en este navegador y aún no en el repositorio (antes que proyecto.json,
+   para que otro dispositivo nunca vea una ficha cuyo archivo no esté arriba). Un fallo no corta la
+   sincronización del resto: el documento queda pendiente y se reintenta en la siguiente. */
+async function ghSubirDocsPendientes(){
+  const hechos = docsSubidos(), vistos = new Set();
+  for(const p of state.proyectos) for(const d of (p.documentos || [])){
+    const a = d.archivo; if(!a || !a.hash || hechos.has(a.hash) || vistos.has(a.hash)) continue;
+    vistos.add(a.hash);
+    let blob = null;
+    try{ blob = await docLeerLocal(a.hash); }catch(e){}
+    if(!blob) continue;   /* subido desde otro dispositivo: ya está arriba */
+    try{
+      const chk = await ghApi('/contents/' + docRuta(a) + '?ref=' + encodeURIComponent(GH.branch));
+      if(chk.status !== 200){
+        const put = await ghApi('/contents/' + docRuta(a), {method:'PUT', body:JSON.stringify({message:'documento ' + (d.nombre || a.nombre), content:await blobB64(blob), branch:GH.branch})});
+        if(!put.ok && put.status !== 422) throw new Error('GitHub ' + put.status);
+      }
+      marcarSubido(a.hash);
+    }catch(e){ console.warn('documento sin subir:', d.nombre, e); }
+  }
+}
+/* el archivo de un documento: de este navegador o, si no está, del repositorio */
+async function docObtener(d){
+  const a = d.archivo; if(!a) return null;
+  let blob = null;
+  try{ blob = await docLeerLocal(a.hash); }catch(e){}
+  if(blob) return blob;
+  if(!GH.on) throw new Error('el archivo no está en este dispositivo y la sincronización no está configurada (Ajustes → Sincronización).');
+  const r = await ghApi('/contents/' + docRuta(a) + '?ref=' + encodeURIComponent(GH.branch));
+  if(!r.ok) throw new Error(r.status === 404 ? 'el archivo aún no está en el repositorio (se subirá cuando sincronice el dispositivo donde se adjuntó).' : 'GitHub ' + r.status);
+  blob = b64Blob(String(await ghContenidoB64(await r.json())).replace(/\s/g, ''), a.mime);
+  try{ await docGuardarLocal(a.hash, blob); }catch(e){}
+  marcarSubido(a.hash);
+  return blob;
+}
+const docVisible = mime => /^(application\/pdf|image\/|text\/)/.test(mime || '');
+async function docAbrir(d, descargarlo){
+  if(!d.archivo){ if(d.enlace) window.open(d.enlace, '_blank', 'noopener'); return; }
+  const verAqui = !descargarlo && docVisible(d.archivo.mime);
+  const w = verAqui ? window.open('', '_blank') : null;   /* se abre ya, o el navegador lo bloquea por ser asíncrono */
+  try{
+    const blob = await docObtener(d);
+    const url = URL.createObjectURL(blob);
+    if(w) w.location.href = url;
+    else { const a = el('a', {href:url, download:d.archivo.nombre || d.nombre}); document.body.appendChild(a); a.click(); a.remove(); }
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
+  }catch(e){ if(w) w.close(); alert('No se pudo abrir «' + d.nombre + '»: ' + e.message); }
+}
+function docDonde(d){
+  if(!d.archivo) return d.enlace ? 'enlace' : 'sin archivo';
+  if(docsSubidos().has(d.archivo.hash)) return 'en la nube';
+  if(d.archivo.dispositivo === ghDevice()) return GH.on ? 'pendiente de subir' : 'solo en este navegador';
+  return 'en la nube';
+}
+/* vincular / desvincular. Queda en el historial del proyecto y, por él, en el de cada elemento */
+function docVincular(d, ids, on){
+  const ts = Date.now(); d.elementos = d.elementos || {};
+  const tocados = ids.filter(id => on ? !d.elementos[id] : !!d.elementos[id]);
+  tocados.forEach(id => { if(on) d.elementos[id] = ts; else delete d.elementos[id]; });
+  if(tocados.length){
+    d.modificado = ts;
+    registrarCambio('documento', (on ? 'Vinculado «' : 'Desvinculado «') + d.nombre + '» (' + (d.tipo || 'documento').toLowerCase() + ')' +
+      (tocados.length > 1 ? (on ? ' a ' : ' de ') + tocados.length + ' elementos' : ''), tocados.length === 1 ? tocados[0] : null, tocados.length > 1 ? tocados : null);
+  }
+  return tocados.length;
+}
+/* alta / edición de un documento. opts.vincular = ids a los que vincularlo al crearlo; opts.alTerminar(doc) */
+function docFormulario(d, opts){
+  if(soloLectura()) return;
+  opts = opts || {};
+  const pr = proyActivo();
+  const NUEVO = '__nuevo__';
+  const iArch = el('input', {type:'file'});
+  const iEnl = el('input', {type:'url', placeholder:'https://… (SharePoint, servidor, correo…)', value:d ? vStr(d.enlace) : ''});
+  const iNom = el('input', {value:d ? d.nombre : '', placeholder:'Informe de pruebas de tarjetas · lote 1'});
+  const tipo0 = d ? d.tipo : 'Informe de pruebas';
+  const iTipo = el('select', null, ...tiposDoc().map(t => el('option', {value:t, ...(t === tipo0 ? {selected:'selected'} : {})}, t)), el('option', {value:NUEVO}, 'Otro tipo nuevo…'));
+  iTipo.addEventListener('change', () => {
+    if(iTipo.value !== NUEVO) return;
+    const n = (prompt('Nombre del nuevo tipo de documento:') || '').trim();
+    if(n && !tiposDoc().includes(n)){ state.tiposDoc = tiposDoc().concat(n); iTipo.insertBefore(el('option', {value:n}, n), iTipo.lastChild); }
+    iTipo.value = n || tipo0;
+  });
+  const iFec = el('input', {type:'date', value:d ? vStr(d.fecha) : isoDia(Date.now())});
+  const iDes = el('textarea', {rows:'2', placeholder:'Opcional'}); iDes.value = d ? vStr(d.descripcion) : '';
+  /* carpeta: la del documento o, si es nuevo, la que esté abierta en la vista Documentos. La carpeta
+     nueva que se cree desde aquí solo se guarda si se guarda el documento */
+  const NUEVA = '__nueva__';
+  const carp0 = d ? docEnCarpeta(pr, d) : (carpetaDe(pr, docCarpeta) ? docCarpeta : '');
+  const iCarp = el('select', null, ...carpetaOpciones(pr, carp0), el('option', {value:NUEVA}, '+ Carpeta nueva…'));
+  /** @type {{id:string, nombre:string, padre:string}|null} */
+  let nueva = null, carpPrev = carp0;
+  iCarp.addEventListener('change', () => {
+    if(iCarp.value !== NUEVA){ carpPrev = iCarp.value; return; }
+    const padre = nueva && carpPrev === nueva.id ? nueva.padre : carpPrev;
+    const n = (prompt('Nombre de la carpeta nueva, dentro de «' + carpetaTxt(pr, padre) + '»:') || '').trim();
+    if(n && /[\/\\]/.test(n)) alert('El nombre no puede llevar «/» ni «\\».');
+    else if(n && !nombreCarpetaLibre(pr, padre, n, null)) alert('Ya hay una carpeta «' + n + '» ahí: elígela en la lista.');
+    else if(n){
+      const vieja = nueva && iCarp.querySelector('option[value="' + nueva.id + '"]'); if(vieja) vieja.remove();
+      nueva = {id:uid(), nombre:n, padre};
+      iCarp.insertBefore(el('option', {value:nueva.id}, (padre ? carpetaTxt(pr, padre) + ' / ' : '') + n + ' (nueva)'), iCarp.lastChild);
+      carpPrev = nueva.id;
+    }
+    iCarp.value = carpPrev;
+  });
+  const infoArch = el('div', {class:'hint', style:'margin-top:4px'}, d && d.archivo ? 'Archivo actual: ' + d.archivo.nombre + ' · ' + fmtTam(d.archivo.tam) + ' (elige otro para sustituirlo)' : 'Hasta ' + fmtTam(DOC_MAX) + '. PDF, imagen, Excel, Word…');
+  iArch.addEventListener('change', () => {
+    const f = iArch.files && iArch.files[0]; if(!f) return;
+    if(!iNom.value.trim()) iNom.value = f.name.replace(/\.[^.]+$/, '');
+    infoArch.textContent = f.name + ' · ' + fmtTam(f.size) + (f.size > DOC_MAX ? ' · demasiado grande' : '');
+  });
+  const nVinc = (opts.vincular || []).length;
+  const body = el('div', null,
+    el('div', {class:'field'}, el('span', {class:'flab'}, 'Archivo'), iArch, infoArch),
+    el('div', {class:'field'}, el('span', {class:'flab'}, 'o enlace (si el archivo vive en otro sitio)'), iEnl),
+    el('div', {class:'field'}, el('span', {class:'flab'}, 'Nombre'), iNom),
+    el('div', {class:'field'}, el('span', {class:'flab'}, 'Carpeta'), iCarp),
+    el('div', {class:'cols2'},
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Tipo de documento'), iTipo),
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Fecha'), iFec)),
+    el('div', {class:'field'}, el('span', {class:'flab'}, 'Descripción'), iDes),
+    nVinc ? el('p', {class:'hint'}, 'Se vinculará a ' + (nVinc === 1 ? 'este elemento' : 'los ' + nVinc + ' elementos seleccionados') + '.') : null,
+    GH.on ? null : el('p', {class:'hint', style:'color:var(--amb)'}, 'Sin sincronización configurada el archivo se queda solo en este navegador. Configúrala en Ajustes → Sincronización para tenerlo en todos los dispositivos.'));
+  let ocupado = false;
+  openModal(d ? 'Editar documento' : 'Nuevo documento', body, () => {
+    if(ocupado) return false;
+    const f = iArch.files && iArch.files[0];
+    const enlace = iEnl.value.trim();
+    if(!f && !enlace && !(d && d.archivo)){ alert('Elige un archivo o pon un enlace.'); return false; }
+    if(f && f.size > DOC_MAX){ alert('El archivo ocupa ' + fmtTam(f.size) + ' y el máximo es ' + fmtTam(DOC_MAX) + '. Súbelo comprimido o pon un enlace.'); return false; }
+    if(!iNom.value.trim()){ alert('Pon un nombre.'); return false; }
+    ocupado = true;
+    (async () => {
+      let archivo = d ? d.archivo : null;
+      if(f){
+        const buf = await f.arrayBuffer();
+        const hash = await hashArchivo(buf);
+        const ext = (f.name.match(/\.([a-z0-9]{1,6})$/i) || [])[1];
+        await docGuardarLocal(hash, new Blob([buf], {type:f.type || 'application/octet-stream'}));
+        archivo = {nombre:f.name, mime:f.type || 'application/octet-stream', tam:f.size, hash, ext:ext ? ext.toLowerCase() : '', dispositivo:ghDevice()};
+      }
+      const carpeta = iCarp.value === NUEVA ? carp0 : iCarp.value;
+      if(nueva && carpeta === nueva.id){
+        pr.carpetasDoc = carpetasProy(pr).concat(nueva);
+        registrarCambio('documento', 'Carpeta nueva «' + carpetaTxt(pr, nueva.id) + '»');
+      }
+      const datos = {nombre:iNom.value.trim(), tipo:iTipo.value === NUEVO ? tipo0 : iTipo.value, fecha:iFec.value, descripcion:iDes.value.trim(), archivo, enlace, carpeta};
+      let doc = d;
+      if(d){ Object.assign(d, datos, {modificado:Date.now()}); registrarCambio('documento', 'Editado «' + d.nombre + '»'); }
+      else {
+        doc = Object.assign({id:uid(), elementos:{}, creado:Date.now(), modificado:Date.now()}, datos);
+        pr.documentos = pr.documentos || []; pr.documentos.push(doc);
+        registrarCambio('documento', 'Nuevo «' + doc.nombre + '» (' + doc.tipo.toLowerCase() + ')');
+        if(nVinc) docVincular(doc, opts.vincular, true);
+      }
+      save(); closeModal();
+      if(opts.alTerminar) opts.alTerminar(doc); else render();
+    })().catch(e => { ocupado = false; alert('No se pudo guardar el documento: ' + e.message); });
+    return false;
+  }, d ? () => {
+    const n = docElems(d).length;
+    if(!confirm('¿Borrar «' + d.nombre + '»?' + (n ? ' Está vinculado a ' + n + ' elemento(s); se desvincula de todos.' : ''))) return false;
+    pr.documentos = docsProy(pr).filter(x => x !== d);
+    registrarCambio('documento', 'Borrado «' + d.nombre + '»' + (n ? ' (estaba vinculado a ' + n + ' elementos)' : ''), null, Object.keys(d.elementos || {}));
+    if(docSel === d.id) docSel = null;
+    save(); render();
+  } : null);
+}
+/* elegir los elementos de un documento: buscador + filtro por tipo + casillas */
+function docVincularModal(d){
+  if(soloLectura()) return;
+  const els = elementosProy();
+  const marcado = new Set(Object.keys(d.elementos || {}).filter(id => els.some(e => e.id === id)));
+  const selBD = selElementos().map(e => e.id);
+  const iBus = el('input', {placeholder:'Buscar por código, Nº de serie, PK, lugar…'});
+  const tiposP = [...new Set(els.map(e => e.tipoId))].map(getTipo).filter(Boolean).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+  const iTipo = el('select', null, el('option', {value:''}, 'Todos los tipos'), ...tiposP.map(t => el('option', {value:t.id}, t.nombre)));
+  const cuenta = el('span', {class:'hint', style:'margin:0'});
+  const lista = el('div', {style:'max-height:46vh;overflow:auto;border:1px solid var(--line);border-radius:10px'});
+  const txt = e => [e.codigo, (getTipo(e.tipoId) || {}).nombre, valorPK(e), e.valores.f_nserie, ...lugaresDe(e).map(l => l.nombre)].filter(Boolean).join(' ').toLowerCase();
+  const visibles = () => { const q = iBus.value.trim().toLowerCase(); return els.filter(e => (!iTipo.value || e.tipoId === iTipo.value) && (!q || txt(e).includes(q))); };
+  const pinta = () => {
+    lista.innerHTML = '';
+    const vs = visibles();
+    vs.slice(0, 600).forEach(e => {
+      const t = getTipo(e.tipoId) || {};
+      const cb = el('input', {type:'checkbox', style:'width:16px;flex:0 0 auto', ...(marcado.has(e.id) ? {checked:'checked'} : {}), onchange:ev => { ev.target.checked ? marcado.add(e.id) : marcado.delete(e.id); cuenta.textContent = marcado.size + ' vinculados'; }});
+      lista.appendChild(el('label', {style:'display:flex;gap:9px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--line);font-size:13px;cursor:pointer'},
+        cb, el('span', {class:'swatch', style:'background:' + (t.color || '#888')}),
+        el('span', {style:'min-width:70px;font-weight:600'}, e.codigo || '—'),
+        el('span', {style:'color:var(--tx2);flex:1'}, (t.nombre || '') + (e.valores.f_nserie ? ' · S/N ' + e.valores.f_nserie : '') + (valorPK(e) ? ' · PK ' + valorPK(e) : '')),
+        el('span', {style:'color:var(--tx3);font-size:12px'}, lugaresDe(e).map(l => l.nombre).join(' · '))));
+    });
+    if(vs.length > 600) lista.appendChild(el('div', {class:'hint', style:'padding:8px 10px'}, 'Se muestran 600 de ' + vs.length + ': afina la búsqueda.'));
+    if(!vs.length) lista.appendChild(el('div', {class:'empty'}, 'Nada con esa búsqueda.'));
+    cuenta.textContent = marcado.size + ' vinculados';
+  };
+  iBus.addEventListener('input', pinta); iTipo.addEventListener('change', pinta);
+  const body = el('div', null,
+    el('div', {style:'display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap'}, el('div', {style:'flex:2 1 220px'}, iBus), el('div', {style:'flex:1 1 140px'}, iTipo)),
+    el('div', {style:'display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;align-items:center'},
+      el('button', {type:'button', class:'btn sm', onclick:() => { visibles().forEach(e => marcado.add(e.id)); pinta(); }}, 'Marcar los de la lista'),
+      el('button', {type:'button', class:'btn sm', onclick:() => { visibles().forEach(e => marcado.delete(e.id)); pinta(); }}, 'Desmarcar los de la lista'),
+      selBD.length ? el('button', {type:'button', class:'btn sm', onclick:() => { selBD.forEach(id => marcado.add(id)); pinta(); }}, 'Añadir los ' + selBD.length + ' seleccionados') : null,
+      el('span', {class:'spacer'}), cuenta),
+    lista);
+  pinta();
+  openModal('Elementos de «' + d.nombre + '»', body, () => {
+    const antes = new Set(Object.keys(d.elementos || {}));
+    const alta = [...marcado].filter(id => !antes.has(id)), baja = [...antes].filter(id => !marcado.has(id) && els.some(e => e.id === id));
+    docVincular(d, alta, true); docVincular(d, baja, false);
+    if(alta.length || baja.length) save();
+    render();
+  });
+}
+/* vincular un documento (existente o nuevo) a varios elementos: barra de selección */
+function bloqueVincularDoc(){
+  if(soloLectura()) return;
+  const els = selElementos(); if(!els.length) return;
+  const ids = els.map(e => e.id), docs = docsProy().slice().sort((a, b) => vStr(b.fecha).localeCompare(vStr(a.fecha)));
+  if(!docs.length){ docFormulario(null, {vincular:ids}); return; }
+  const iDoc = el('select', null, ...docOpciones(proyActivo(), docs));
+  openModal('Vincular documento a ' + ids.length + ' elemento' + (ids.length === 1 ? '' : 's'),
+    el('div', null,
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Documento ya subido'), iDoc),
+      el('button', {type:'button', class:'btn sm', onclick:() => { closeModal(); docFormulario(null, {vincular:ids}); }}, '+ Subir uno nuevo y vincularlo')),
+    () => {
+      const d = docs.find(x => x.id === iDoc.value); if(!d) return false;
+      const n = docVincular(d, ids, true);
+      save(); render();
+      alert(n ? '«' + d.nombre + '» vinculado a ' + n + ' elemento(s).' : 'Ya estaba vinculado a todos.');
+    });
+}
+/* pestaña «Documentos» de la ficha de un elemento */
+function panelDocsElemento(e, alCambiar, puedeSalir){
+  const box = el('div', null);
+  const pinta = () => {
+    box.innerHTML = '';
+    const ds = docsDe(e);
+    if(ds.length){
+      const lista = el('div', {class:'list', style:'margin-bottom:12px'});
+      ds.forEach(d => lista.appendChild(el('div', {class:'row soft'},
+        el('span', {class:'grow'}, el('b', null, d.nombre), el('span', {style:'color:var(--tx3);font-size:12px'}, ' · ' + (d.tipo || '') + (d.fecha ? ' · ' + docFecha(d) : '') +
+          (docEnCarpeta(proyActivo(), d) ? ' · ' + carpetaTxt(proyActivo(), docEnCarpeta(proyActivo(), d)) : ''))),
+        el('button', {type:'button', class:'btn sm', onclick:() => docAbrir(d)}, d.archivo ? 'Abrir' : 'Ir al enlace'),
+        fechaVista ? null : el('button', {type:'button', class:'btn sm danger', title:'Desvincular de este elemento', onclick:() => { docVincular(d, [e.id], false); save(); pinta(); if(alCambiar) alCambiar(); }}, '✕'))));
+      box.appendChild(lista);
+    } else box.appendChild(el('div', {class:'empty', style:'padding:14px'}, 'Sin documentos vinculados.'));
+    if(fechaVista) return;
+    const libres = docsProy().filter(d => !ds.includes(d));
+    if(libres.length){
+      const iDoc = el('select', {style:'flex:1;min-width:0'}, ...docOpciones(proyActivo(), libres));
+      box.appendChild(el('div', {style:'display:flex;gap:8px;margin-bottom:8px'}, iDoc,
+        el('button', {type:'button', class:'btn sm', onclick:() => { const d = libres.find(x => x.id === iDoc.value); if(!d) return; docVincular(d, [e.id], true); save(); pinta(); if(alCambiar) alCambiar(); }}, 'Vincular')));
+    }
+    box.appendChild(el('button', {type:'button', class:'btn sm', onclick:() => {
+      /* el formulario del documento sustituye a la ficha; al terminar se vuelve a abrir la ficha */
+      if(puedeSalir && !puedeSalir()) return;
+      docFormulario(null, {vincular:[e.id], alTerminar:() => { render(); nuevoElemento(e.id, null, 'docs'); }});
+    }}, '+ Subir documento nuevo y vincularlo'));
+  };
+  pinta();
+  return box;
+}
+function viewDocumentos(){
+  const c = el('div', null), pr = proyActivo(), docs = docsProy(pr), ro = !!fechaVista;
+  if(docCarpeta && !carpetaDe(pr, docCarpeta)) docCarpeta = '';
+  docMarcadosVigentes(pr);
+  c.appendChild(el('div', {class:'sec-title'}, 'Documentos y certificados', el('span', {class:'muted'}, pr.nombre + ' · ' + docs.length + ' documentos'),
+    el('span', {class:'spacer'}),
+    el('button', {class:'btn sm', title:'Carpeta nueva dentro de «' + carpetaTxt(pr, docCarpeta) + '»', onclick:() => carpetaFormulario(null, docCarpeta)}, '+ Carpeta'),
+    el('button', {class:'btn red sm', onclick:() => docFormulario(null)}, '+ Subir documento')));
+  if(!docs.length && !carpetasProy(pr).length){
+    c.appendChild(el('div', {class:'note'}, 'Aún no hay documentos. Sube un certificado, un informe de pruebas o un acta (o pon su enlace) y vincúlalo a los elementos que cubre: un informe de pruebas de una tirada de tarjetas se vincula a todas ellas de una vez. También puedes marcar los elementos en la Base de datos y usar «Vincular documento…». Para tenerlos ordenados, crea carpetas y subcarpetas con «+ Carpeta».'));
+    return c;
+  }
+  const tipos = [...new Set(docs.map(d => d.tipo).filter(Boolean))];
+  const iBus = el('input', {placeholder:'Buscar en todas las carpetas…', style:'width:auto;min-width:220px'});
+  c.appendChild(el('div', {class:'toolbar', style:'margin-bottom:4px'},
+    el('select', {onchange:ev => { docFiltroTipo = ev.target.value; render(); }}, el('option', {value:''}, 'Todos los tipos'),
+      ...tipos.map(t => el('option', {value:t, ...(t === docFiltroTipo ? {selected:'selected'} : {})}, t))),
+    iBus,
+    el('label', {style:'display:flex;gap:6px;align-items:center;font-size:12.5px;color:var(--tx2);cursor:pointer;white-space:nowrap', title:'Ver también los documentos de las subcarpetas de la carpeta abierta'},
+      el('input', {type:'checkbox', style:'width:15px;height:15px;margin:0', ...(docConSub ? {checked:'checked'} : {}), onchange:ev => { docConSub = ev.target.checked; render(); }}), 'Incluir subcarpetas'),
+    el('span', {class:'spacer'}),
+    GH.on ? null : el('span', {style:'color:var(--amb);font-size:12px'}, 'Sin sincronización: los archivos están solo en este navegador')));
+
+  /* nº de documentos de cada carpeta, contando sus subcarpetas */
+  const directos = new Map();
+  docs.forEach(d => { const k = docEnCarpeta(pr, d); directos.set(k, (directos.get(k) || 0) + 1); });
+  const total = (id, niv) => (niv || 0) > 50 ? 0 : (directos.get(id) || 0) + carpetaHijas(pr, id).reduce((s, h) => s + total(h.id, (niv || 0) + 1), 0);
+
+  /* árbol de carpetas */
+  const arbol = el('div', {class:'dtree'});
+  const nodo = (id, nombre, niv) => {
+    const it = el('div', {class:'dti' + (id === docCarpeta ? ' on' : ''), style:'padding-left:' + (8 + niv * 14) + 'px', title:id ? carpetaTxt(pr, id) : 'Todos los documentos del proyecto',
+      onclick:() => { docCarpeta = id; render(); }},
+      icoCarpeta(), el('span', {class:'grow'}, nombre), el('span', {class:'count'}, String(total(id))));
+    destinoCarpeta(it, id);
+    if(id) arrastrable(it, () => ({carpeta:id}));
+    return it;
+  };
+  arbol.appendChild(nodo('', 'Documentos', 0));
+  const rama = (padre, niv) => { if(niv > 50) return; carpetaHijas(pr, padre).forEach(h => { arbol.appendChild(nodo(h.id, h.nombre, niv)); rama(h.id, niv + 1); }); };
+  rama('', 1);
+
+  /* ruta de la carpeta abierta (cada tramo lleva a su carpeta y admite soltar documentos) */
+  const migas = el('div', {class:'migas'});
+  [{id:'', nombre:'Documentos'}, ...carpetaRuta(pr, docCarpeta)].forEach((x, i, arr) => {
+    if(i) migas.appendChild(el('span', {class:'sep'}, '›'));
+    const ultimo = i === arr.length - 1;
+    migas.appendChild(destinoCarpeta(ultimo ? el('b', null, x.nombre) : el('a', {href:'#', onclick:ev => { ev.preventDefault(); docCarpeta = x.id; render(); }}, x.nombre), x.id));
+  });
+  if(docCarpeta) migas.append(el('span', {class:'spacer'}),
+    el('button', {class:'btn sm', onclick:() => carpetaFormulario(carpetaDe(pr, docCarpeta))}, 'Renombrar, mover o borrar carpeta…'));
+
+  /* tabla: subcarpetas de la abierta y luego sus documentos. Se pintan TODOS los documentos y se
+     ocultan los de otras carpetas, para que el buscador encuentre en todo el proyecto sin re-renderizar */
+  const ambito = docConSub ? carpetaRama(pr, docCarpeta) : new Set([docCarpeta]);
+  const ncol = ro ? 6 : 7;
+  const filasCarp = carpetaHijas(pr, docCarpeta).map(h => {
+    const n = total(h.id), ns = carpetaHijas(pr, h.id).length;
+    const tr = el('tr', {'data-carp':h.id, style:'cursor:pointer', onclick:() => { docCarpeta = h.id; render(); }},
+      ro ? null : el('td', {class:'dselc'}),
+      el('td', {colspan:'5'}, icoCarpeta(), ' ', el('b', null, h.nombre),
+        el('span', {style:'color:var(--tx3);font-size:12px'}, ' · ' + n + ' documento' + (n === 1 ? '' : 's') + (ns ? ' · ' + ns + ' subcarpeta' + (ns === 1 ? '' : 's') : ''))),
+      el('td', {style:'white-space:nowrap'}, el('button', {class:'btn sm', onclick:ev => { ev.stopPropagation(); carpetaFormulario(h); }}, 'Editar…')));
+    destinoCarpeta(tr, h.id); arrastrable(tr, () => ({carpeta:h.id}));
+    return tr;
+  });
+  const lista = docs.filter(d => !docFiltroTipo || d.tipo === docFiltroTipo).sort((a, b) => vStr(b.fecha).localeCompare(vStr(a.fecha)) || a.nombre.localeCompare(b.nombre, 'es'));
+  const filasDoc = lista.map(d => {
+    const n = docElems(d).length, donde = docDonde(d), k = docEnCarpeta(pr, d), en = ambito.has(k);
+    const tr = el('tr', {'data-doc':d.id, 'data-en':en ? '1' : '', class:docMarcados.has(d.id) ? 'selr' : '',
+      style:'cursor:pointer' + (d.id === docSel ? ';background:var(--panel3)' : '') + (en ? '' : ';display:none'), onclick:() => { docSel = d.id; render(); }},
+      ro ? null : el('td', {class:'dselc'}, el('input', {type:'checkbox', title:'Marcar para moverlo de carpeta', ...(docMarcados.has(d.id) ? {checked:'checked'} : {}),
+        onclick:ev => { ev.stopPropagation(); if(ev.target.checked) docMarcados.add(d.id); else docMarcados.delete(d.id); docSelRefrescar(); }})),
+      el('td', null, el('b', null, d.nombre),
+        k !== docCarpeta ? el('div', {class:'druta'}, icoCarpeta(), ' ', carpetaTxt(pr, k)) : null,
+        d.descripcion ? el('div', {style:'color:var(--tx3);font-size:12px'}, d.descripcion) : null),
+      el('td', null, el('span', {class:'pill ' + (/certific/i.test(d.tipo || '') ? 'green' : /prueba|ensayo/i.test(d.tipo || '') ? 'blue' : 'gray')}, d.tipo || '—')),
+      el('td', {style:'white-space:nowrap'}, docFecha(d) || '—'),
+      el('td', null, String(n)),
+      el('td', {style:'color:var(--tx3);font-size:12px;white-space:nowrap'}, (d.archivo ? fmtTam(d.archivo.tam) + ' · ' : '') + donde,
+        /pendiente|solo/.test(donde) ? el('span', {style:'color:var(--amb)'}, ' ●') : null),
+      el('td', {style:'white-space:nowrap'},
+        el('button', {class:'btn sm', onclick:ev => { ev.stopPropagation(); docAbrir(d); }}, d.archivo ? 'Abrir' : 'Enlace'), ' ',
+        el('button', {class:'btn sm', onclick:ev => { ev.stopPropagation(); docVincularModal(d); }}, 'Vincular…')));
+    return arrastrable(tr, () => ({docs:docMarcados.has(d.id) ? [...docMarcados] : [d.id]}));
+  });
+  const vacio = el('tr', null, el('td', {colspan:String(ncol), class:'empty'}, ''));
+  const tb = el('tbody', null, ...filasCarp, ...filasDoc, vacio);
+  const hd = ro ? null : el('input', {type:'checkbox', title:'Marcar o desmarcar todos los de la lista', onchange:ev => {
+    tb.querySelectorAll('tr[data-doc]').forEach(tr => { if(/** @type {HTMLElement} */ (tr).style.display === 'none') return; const id = tr.getAttribute('data-doc'); if(ev.target.checked) docMarcados.add(id); else docMarcados.delete(id); });
+    docSelRefrescar(); }});
+  const w = el('div', {class:'tablewrap'}, el('table', null,
+    el('thead', null, el('tr', null, ro ? null : el('th', {class:'dselc'}, hd), el('th', null, 'Documento'), el('th', null, 'Tipo'), el('th', null, 'Fecha'), el('th', null, 'Elementos'), el('th', null, 'Archivo'), el('th', null, ''))),
+    tb));
+  /* búsqueda sin re-renderizar (no se pierde el foco al escribir): con texto, busca en todas las carpetas */
+  const txt = d => [d.nombre, d.descripcion, d.tipo, d.archivo && d.archivo.nombre, carpetaTxt(pr, docEnCarpeta(pr, d))].join(' ').toLowerCase();
+  const filtrar = () => {
+    const q = iBus.value.trim().toLowerCase(); let n = 0;
+    filasCarp.forEach(tr => { tr.style.display = q ? 'none' : ''; });
+    filasDoc.forEach(tr => { const d = docs.find(x => x.id === tr.getAttribute('data-doc'));
+      const ok = d && (q ? txt(d).includes(q) : tr.getAttribute('data-en') === '1'); tr.style.display = ok ? '' : 'none'; if(ok) n++; });
+    vacio.style.display = n || (!q && filasCarp.length) ? 'none' : '';
+    /** @type {HTMLElement} */ (vacio.firstChild).textContent = q ? 'Nada con esa búsqueda.' :
+      docFiltroTipo ? 'No hay documentos de tipo «' + docFiltroTipo + '» en esta carpeta.' :
+      'Carpeta vacía. Sube aquí un documento con «+ Subir documento» o arrastra documentos desde otra carpeta.';
+    docSelRefrescar(c);
+  };
+  iBus.addEventListener('input', filtrar);
+  c.appendChild(el('div', {class:'doclay'}, arbol, el('div', {class:'docmain'}, migas, w, docBarra())));
+  filtrar();
+
+  const d = docs.find(x => x.id === docSel);
+  if(!d){ c.appendChild(el('p', {class:'hint'}, 'Pulsa un documento para ver y gestionar sus elementos.')); return c; }
+  const els = docElems(d);
+  c.appendChild(el('div', {class:'sec-title'}, d.nombre, el('span', {class:'muted'}, (d.tipo || '') + ' · ' + carpetaTxt(pr, docEnCarpeta(pr, d)) + ' · ' + els.length + ' elementos vinculados'),
+    el('span', {class:'spacer'}),
+    d.archivo ? el('button', {class:'btn sm', onclick:() => docAbrir(d, true)}, 'Descargar') : null,
+    el('button', {class:'btn sm', onclick:() => docFormulario(d)}, 'Editar'),
+    el('button', {class:'btn red sm', onclick:() => docVincularModal(d)}, 'Vincular elementos…')));
+  if(d.enlace) c.appendChild(el('p', {class:'hint', style:'margin-top:0'}, 'Enlace: ', el('a', {href:d.enlace, target:'_blank', rel:'noopener', style:'color:var(--blu)'}, d.enlace)));
+  if(!els.length){ c.appendChild(el('div', {class:'note'}, 'No está vinculado a ningún elemento. «Vincular elementos…» abre la lista del proyecto con buscador.')); return c; }
+  const ord = els.slice().sort((a, b) => ((getTipo(a.tipoId) || {}).nombre || '').localeCompare((getTipo(b.tipoId) || {}).nombre || '', 'es') || vStr(a.codigo).localeCompare(vStr(b.codigo), 'es', {numeric:true}));
+  const w2 = el('div', {class:'tablewrap'});
+  w2.appendChild(el('table', null,
+    el('thead', null, el('tr', null, fechaVista ? null : selCabecera(ord.map(e => e.id)), el('th', null, 'Código'), el('th', null, 'Tipo'), el('th', null, 'PK / Nº de serie'), el('th', null, 'Lugar'), el('th', null, 'Estado'), el('th', null, 'Vinculado'), el('th', null, ''))),
+    el('tbody', null, ...ord.map(e => {
+      const t = getTipo(e.tipoId) || {}, est = valorEstado(e);
+      const celdas = [
+        el('td', null, el('code', {class:'pill2'}, e.codigo || '—')),
+        el('td', null, el('span', {class:'swatch', style:'display:inline-block;margin-right:7px;vertical-align:1px;background:' + (t.color || '#888')}), t.nombre || '—'),
+        el('td', null, [valorPK(e), e.valores.f_nserie ? 'S/N ' + e.valores.f_nserie : ''].filter(Boolean).join(' · ') || '—'),
+        el('td', {style:'color:var(--tx3);font-size:12px'}, lugaresDe(e).map(l => l.nombre).join(' · ') || '—'),
+        el('td', null, est ? el('span', {class:'badge ' + estadoBadgeClass(est)}, est) : '—'),
+        el('td', {style:'color:var(--tx3);font-size:12px;white-space:nowrap'}, new Date(d.elementos[e.id]).toLocaleDateString('es-ES')),
+        el('td', {style:'white-space:nowrap'}, el('button', {class:'btn sm', onclick:() => nuevoElemento(e.id)}, 'Abrir'), ' ',
+          fechaVista ? null : el('button', {class:'btn sm danger', title:'Desvincular', onclick:() => { docVincular(d, [e.id], false); save(); render(); }}, '✕'))];
+      return fechaVista ? el('tr', null, ...celdas) : selFila(e, ...celdas);
+    }))));
+  c.appendChild(w2);
+  if(!fechaVista) c.appendChild(barraSeleccion());
+  return c;
+}
+
+/* ================= historial de un elemento ================= */
+/* Sale de las instantáneas que guarda cada elemento (e.hist: cómo estaba ANTES de cada cambio) y,
+   para lo que no tiene instantánea (cambios antiguos, más allá de las últimas HIST_MAX), de las
+   entradas del historial del proyecto que lo nombran. Cada cambio dice a qué replanteo pertenece
+   si se hizo con uno abierto. */
+function repDeTs(pr, ts){ return pr ? ((pr.replanteos || []).find(r => ts >= r.inicio && ts <= (r.fin || Infinity)) || null) : null; }
+function difsSnap(tipoId, a, b){
+  const out = [];
+  if(vStr(a.codigo) !== vStr(b.codigo)) out.push({etq:'Código', antes:vStr(a.codigo), despues:vStr(b.codigo)});
+  const va = a.valores || {}, vb = b.valores || {}, t = getTipo(tipoId);
+  const ks = [...new Set((t ? t.campos.map(r => r.campoId) : []).concat(Object.keys(va), Object.keys(vb)))];
+  ks.forEach(k => {
+    const x = vStr(va[k]), y = vStr(vb[k]); if(x === y) return;
+    const c = getCampo(k) || {etiqueta:k, tipo:'text'};
+    if(c.tipo === 'focos'){ const fx = focosResumen(x), fy = focosResumen(y); if(fx !== fy) out.push({etq:c.etiqueta, antes:fx, despues:fy}); return; }
+    if(c.tipo === 'photo' || /^(data:|##foto:)/.test(x) || /^(data:|##foto:)/.test(y)){ out.push({etq:c.etiqueta, txt:y ? (x ? 'cambiada' : 'añadida') : 'quitada'}); return; }
+    out.push({etq:c.etiqueta, antes:x, despues:y});
+  });
+  if(JSON.stringify(a.plano || null) !== JSON.stringify(b.plano || null)) out.push({etq:'Posición en el plano', txt:b.plano ? 'colocado en la hoja ' + b.plano.page : 'quitada'});
+  return out;
+}
+function historialElemento(e){
+  const pr = state.proyectos.find(p => p.id === e.proyectoId);
+  const h = e.hist || [];
+  /** @type {{ts:number, origen?:string, difs?:any[], txt?:string, rep?:any}[]} */
+  const out = [];
+  h.forEach((x, i) => {
+    const despues = i + 1 < h.length ? h[i + 1].snap : {codigo:e.codigo, valores:e.valores, plano:e.plano};
+    const difs = difsSnap(e.tipoId, x.snap || {}, despues || {});
+    if(difs.length) out.push({ts:x.ts, origen:x.origen || '', difs});
+  });
+  if(e.creado) out.push({ts:e.creado, txt:'Alta del elemento'});
+  if(e.borrado) out.push({ts:e.borrado, txt:'Baja del elemento'});
+  /* lo que solo consta en el historial del proyecto (sin instantánea a menos de 5 s) */
+  const cerca = ts => out.some(o => Math.abs(o.ts - ts) < 5000);
+  ((pr && pr.historial) || []).forEach(x => {
+    if(x.ref !== e.id && !(x.refs && x.refs.includes(e.id))) return;
+    if(x.accion !== 'documento' && cerca(x.ts)) return;
+    out.push({ts:x.ts, txt:x.accion.charAt(0).toUpperCase() + x.accion.slice(1) + (x.ref === e.id ? ': ' + x.detalle : ' · ' + x.detalle)});
+  });
+  out.forEach(o => { o.rep = repDeTs(pr, o.ts); });
+  return out.sort((a, b) => b.ts - a.ts);
+}
+function panelHistorialElemento(e, hl){
+  const box = el('div', null);
+  if(!hl.length){ box.appendChild(el('div', {class:'empty'}, 'Sin cambios registrados.')); return box; }
+  const vac = v => v === '' ? '(vacío)' : v;
+  const lista = el('div', {class:'hlist'});
+  hl.forEach(o => {
+    const cuerpo = el('div', {style:'flex:1;min-width:0'});
+    const cab = el('div', {style:'display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:2px'});
+    if(o.rep) cab.appendChild(el('button', {type:'button', class:'pill amber', style:'border:0;cursor:pointer', title:'Ver el replanteo',
+      onclick:() => { repSel = o.rep.id; closeModal(); setView('replanteo'); }}, o.rep.nombre));
+    if(o.origen) cab.appendChild(el('span', {class:'pill gray'}, o.origen));
+    if(cab.childNodes.length) cuerpo.appendChild(cab);
+    if(o.txt) cuerpo.appendChild(el('div', null, o.txt));
+    (o.difs || []).forEach(d => cuerpo.appendChild(el('div', null, el('span', {style:'color:var(--tx2)'}, d.etq + ': '),
+      d.txt ? d.txt : vac(d.antes) + ' → ' + vac(d.despues))));
+    lista.appendChild(el('div', {class:'hitem'},
+      el('div', {class:'hf'}, new Date(o.ts).toLocaleString('es-ES', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'})),
+      cuerpo));
+  });
+  box.appendChild(lista);
+  if((e.hist || []).length >= HIST_MAX) box.appendChild(el('p', {class:'hint'}, 'Del detalle campo a campo se guardan los ' + HIST_MAX + ' últimos cambios; los anteriores salen tal como se anotaron en el Historial del proyecto.'));
+  return box;
+}
+
+/* ================= selección múltiple y edición en bloque ================= */
+/* Casilla en cada fila de las listas de elementos (Base de datos, Certificaciones, Instalados).
+   Mayús+clic marca todo el tramo desde la última casilla pulsada. La selección se comparte entre
+   esas vistas y se vacía al cambiar de proyecto. Los cambios en bloque pasan por lo mismo que la
+   ficha: instantánea en el historial del elemento, reglas de campos condicionales y registro. */
+const selElems = new Set();
+let selProy = null, selAncla = null, selVisibles = [];
+const vStr = x => x == null ? '' : String(x);
+function selVigente(){
+  if(selProy !== state.proyectoActivo){ selElems.clear(); selProy = state.proyectoActivo; selAncla = null; }
+  for(const id of [...selElems]){
+    const e = state.elementos.find(x => x.id === id);
+    if(!e || e.borrado || e.proyectoId !== state.proyectoActivo) selElems.delete(id);
+  }
+  return selElems;
+}
+function selElementos(){ return [...selVigente()].map(id => state.elementos.find(x => x.id === id)).filter(Boolean); }
+/* cabecera de la columna de casillas: marca o desmarca todos los de la lista (con sus filtros) */
+function selCabecera(ids){
+  selVigente(); selVisibles = ids.slice();
+  const n = ids.filter(id => selElems.has(id)).length;
+  const cb = el('input', {type:'checkbox', title:'Marcar o desmarcar todos los de la lista', ...(n && n === ids.length ? {checked:'checked'} : {}),
+    onchange:ev => { ids.forEach(id => ev.target.checked ? selElems.add(id) : selElems.delete(id)); selRefrescar(); }});
+  cb.indeterminate = n > 0 && n < ids.length;
+  return el('th', {class:'selc'}, cb);
+}
+function selFila(e, ...celdas){
+  const cb = el('input', {type:'checkbox', title:'Seleccionar (Mayús+clic: todo el tramo)', ...(selElems.has(e.id) ? {checked:'checked'} : {}), onclick:ev => {
+    ev.stopPropagation();
+    const on = ev.target.checked;
+    if(ev.shiftKey && selAncla && selVisibles.includes(selAncla) && selVisibles.includes(e.id)){
+      const a = selVisibles.indexOf(selAncla), b = selVisibles.indexOf(e.id);
+      selVisibles.slice(Math.min(a, b), Math.max(a, b) + 1).forEach(id => on ? selElems.add(id) : selElems.delete(id));
+    } else if(on) selElems.add(e.id); else selElems.delete(e.id);
+    selAncla = e.id; selRefrescar();
+  }});
+  return el('tr', {'data-sel':e.id, class:selElems.has(e.id) ? 'selr' : ''}, el('td', {class:'selc'}, cb), ...celdas);
+}
+/* repinta casillas y barra sin re-renderizar la vista (no se pierde el scroll) */
+function selRefrescar(){
+  selVigente();
+  document.querySelectorAll('tr[data-sel]').forEach(tr => {
+    const on = selElems.has(tr.getAttribute('data-sel'));
+    tr.classList.toggle('selr', on);
+    const cb = /** @type {HTMLInputElement} */ (tr.querySelector('td.selc input')); if(cb) cb.checked = on;
+  });
+  const hd = /** @type {HTMLInputElement} */ (document.querySelector('th.selc input'));
+  if(hd){ const n = selVisibles.filter(id => selElems.has(id)).length; hd.checked = n > 0 && n === selVisibles.length; hd.indeterminate = n > 0 && n < selVisibles.length; }
+  const vieja = document.getElementById('selbar');
+  if(vieja) vieja.replaceWith(barraSeleccion());
+}
+function barraSeleccion(){
+  const els = selElementos();
+  if(!els.length || fechaVista) return el('div', {id:'selbar', style:'display:none'});
+  const fuera = els.filter(e => !selVisibles.includes(e.id)).length;
+  const conCampo = cid => els.filter(e => (getTipo(e.tipoId) || {campos:[]}).campos.some(r => r.campoId === cid)).length;
+  const rapido = (cid, rotulo) => {
+    if(!conCampo(cid)) return null;
+    return el('select', {title:rotulo + ' de los seleccionados', onchange:ev => { const v = ev.target.value; ev.target.value = ''; if(v) bloqueValor(cid, v); }},
+      el('option', {value:''}, rotulo + '…'), ...((getCampo(cid) || {}).opciones || []).map(o => el('option', {value:o}, o)));
+  };
+  return el('div', {class:'selbar', id:'selbar'},
+    el('span', {class:'n'}, els.length + (els.length === 1 ? ' seleccionado' : ' seleccionados')),
+    fuera ? el('span', {style:'color:var(--amb);font-size:12px', title:'Están marcados pero los filtros o la vista actual no los muestran. Los cambios también se aplican a ellos.'}, '(' + fuera + ' fuera de esta lista)') : null,
+    rapido('f_estado', 'Estado de montaje'),
+    rapido('f_cert', 'Certificación'),
+    el('button', {class:'btn sm', onclick:() => bloqueEditarCampo(null)}, 'Otro campo…'),
+    el('button', {class:'btn sm', onclick:bloqueVincularDoc}, 'Vincular documento…'),
+    el('span', {class:'spacer'}),
+    el('button', {class:'btn sm danger', onclick:bloqueBorrar}, 'Borrar'),
+    el('button', {class:'btn sm', onclick:() => { selElems.clear(); selRefrescar(); }}, '✕ Quitar selección'));
+}
+/* quita el valor de los campos que dejan de aplicar por sus reglas (lo mismo que hace la ficha al guardar) */
+function limpiarOcultos(t, v){
+  for(let p = 0; p < Math.max(2, t.campos.length); p++){
+    let cambio = false;
+    t.campos.forEach(r => { if(vStr(v[r.campoId]) && !campoVisible(t, r, v)){ v[r.campoId] = ''; cambio = true; } });
+    if(!cambio) break;
+  }
+}
+/* aplica {campoId: valor} a los elementos `ids` que tengan ese campo. Devuelve {n, oblig} */
+function edicionEnBloque(ids, cambios, titulo){
+  const ts = Date.now(), tocados = [];
+  let oblig = 0;
+  ids.forEach(id => {
+    const e = state.elementos.find(x => x.id === id && !x.borrado); if(!e) return;
+    const t = getTipo(e.tipoId); if(!t) return;
+    const nv = Object.assign({}, e.valores);
+    let salta = false;
+    for(const cid in cambios){
+      const r = t.campos.find(x => x.campoId === cid); if(!r) continue;
+      if(r.obligatorio && !vStr(cambios[cid])){ salta = true; break; }
+      nv[cid] = vStr(cambios[cid]);
+    }
+    if(salta){ oblig++; return; }
+    limpiarOcultos(t, nv);
+    const difs = [...new Set(Object.keys(e.valores).concat(Object.keys(nv)))].filter(k => vStr(e.valores[k]) !== vStr(nv[k]));
+    if(!difs.length) return;
+    histGuardar(e, ts, 'edición en bloque');
+    e.valores = nv; e.modificado = ts; tocados.push(e.id);
+  });
+  if(tocados.length){
+    registrarCambio('edición en bloque', titulo + ' · ' + tocados.length + (tocados.length === 1 ? ' elemento' : ' elementos'), null, tocados);
+    save();
+  }
+  return {n:tocados.length, oblig};
+}
+function bloqueAviso(r, total){
+  const no = total - r.n - r.oblig;
+  alert(r.n + ' de ' + total + ' elemento(s) cambiado(s).' +
+    (r.oblig ? '\n' + r.oblig + ' sin cambiar: el campo es obligatorio en su tipo y no se puede dejar vacío.' : '') +
+    (no > 0 ? '\n' + no + ' sin cambiar: ya tenían ese valor o su tipo no lleva ese campo.' : ''));
+}
+/* desplegables rápidos de la barra (Estado de montaje, Certificación) */
+function bloqueValor(cid, v){
+  if(soloLectura()) return;
+  if(cid === 'f_cert' && v === CERT_PARCIAL){ bloqueEditarCampo('f_cert', v); return; }
+  const els = selElementos(), etq = (getCampo(cid) || {}).etiqueta || cid;
+  if(!confirm('¿Poner «' + etq + ': ' + v + '» en los ' + els.length + ' elementos seleccionados?')) return;
+  const r = edicionEnBloque(els.map(e => e.id), {[cid]:v}, etq + ' → ' + v);
+  render(); bloqueAviso(r, els.length);
+}
+/* campos de certificación parcial: % o cantidad (al escribir en uno se vacía el otro) y descripción */
+function certParcialInputs(pct, cant, desc){
+  const iPct = el('input', {type:'number', min:'0', max:'100', step:'any', placeholder:'p. ej. 60', value:pct || ''});
+  const iCant = el('input', {type:'number', min:'0', step:'any', placeholder:'en las unidades del elemento', value:cant || ''});
+  const iDesc = el('input', {placeholder:'Opcional', value:desc || ''});
+  iPct.addEventListener('input', () => { if(iPct.value) iCant.value = ''; });
+  iCant.addEventListener('input', () => { if(iCant.value) iPct.value = ''; });
+  const nodo = el('div', null,
+    el('div', {class:'cols2'},
+      el('div', {class:'field'}, el('span', {class:'flab'}, '% certificado'), iPct),
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'o cantidad certificada'), iCant)),
+    el('div', {class:'field'}, el('span', {class:'flab'}, 'Descripción de la certificación'), iDesc));
+  const leer = () => {
+    const p = numCampo(iPct.value), q = numCampo(iCant.value);
+    if(!(p > 0) && !(q > 0)){ alert('Pon el % certificado o la cantidad certificada.'); return null; }
+    if(p > 100){ alert('El % no puede pasar de 100. Si está todo, elige «Certificado».'); return null; }
+    return {f_cert:CERT_PARCIAL, f_certpct:p > 0 ? iPct.value.trim() : '', f_certcant:q > 0 ? iCant.value.trim() : '', f_certdesc:iDesc.value.trim()};
+  };
+  return {nodo, leer};
+}
+/* «Otro campo…»: cualquier campo que lleven los tipos seleccionados */
+function bloqueEditarCampo(cidIni, valIni){
+  if(soloLectura()) return;
+  const els = selElementos(); if(!els.length) return;
+  const cuenta = {};
+  els.forEach(e => (getTipo(e.tipoId) || {campos:[]}).campos.forEach(r => { cuenta[r.campoId] = (cuenta[r.campoId] || 0) + 1; }));
+  const campos = Object.keys(cuenta).map(getCampo).filter(c => c && !['photo', 'doc', 'focos', 'pk'].includes(c.tipo))
+    .sort((a, b) => cuenta[b.id] - cuenta[a.id] || a.etiqueta.localeCompare(b.etiqueta, 'es'));
+  if(!campos.length){ alert('Los elementos seleccionados no tienen campos editables en bloque.'); return; }
+  let cid = cidIni && campos.some(c => c.id === cidIni) ? cidIni : campos[0].id;
+  const selC = el('select', null, ...campos.map(c => el('option', {value:c.id, ...(c.id === cid ? {selected:'selected'} : {})},
+    c.etiqueta + (cuenta[c.id] < els.length ? '  (' + cuenta[c.id] + ' de ' + els.length + ')' : ''))));
+  const zona = el('div', null);
+  let leer = () => null;
+  const pinta = (v0) => {
+    zona.innerHTML = ''; cid = selC.value;
+    const c = getCampo(cid);
+    let inp;
+    if(c.tipo === 'select') inp = el('select', null, el('option', {value:''}, '(dejar vacío)'), ...(c.opciones || []).map(o => el('option', {value:o, ...(o === v0 ? {selected:'selected'} : {})}, o)));
+    else if(c.tipo === 'boolean') inp = el('select', null, el('option', {value:''}, '(dejar vacío)'), el('option', {value:'Sí'}, 'Sí'), el('option', {value:'No'}, 'No'));
+    else if(c.tipo === 'number') inp = el('input', {type:'number', step:'any'});
+    else if(c.tipo === 'date') inp = el('input', {type:'date'});
+    else if(c.tipo === 'lugar'){ inp = selectLugar(c, ''); inp.options[0].textContent = '(dejar vacío)'; }
+    else inp = el('input', {placeholder:'(vacío = borrar el valor)'});
+    const extra = el('div', null);
+    let parcial = null;
+    const extraPinta = () => {
+      extra.innerHTML = ''; parcial = null;
+      if(cid === 'f_cert' && inp.value === CERT_PARCIAL){ parcial = certParcialInputs('', '', ''); extra.appendChild(parcial.nodo); }
+    };
+    inp.addEventListener('change', extraPinta);
+    zona.appendChild(el('div', {class:'field'}, el('span', {class:'flab'}, 'Nuevo valor'), inp));
+    zona.appendChild(extra);
+    extraPinta();
+    leer = () => parcial ? parcial.leer() : {[cid]:inp.value.trim()};
+  };
+  selC.addEventListener('change', () => pinta(''));
+  pinta(valIni || '');
+  openModal('Cambiar en ' + els.length + ' elemento' + (els.length === 1 ? '' : 's'),
+    el('div', null,
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Campo'), selC),
+      zona,
+      el('p', {class:'hint'}, 'Solo cambia en los elementos cuyo tipo lleva ese campo. Cada elemento guarda el cambio en su historial.')),
+    () => {
+      const cambios = leer(); if(!cambios) return false;
+      const c = getCampo(cid), v = cambios[cid];
+      const r = edicionEnBloque(els.map(e => e.id), cambios, c.etiqueta + ' → ' + (v === CERT_PARCIAL ? certResumen(cambios) : (v || '(vacío)')));
+      closeModal(); render(); bloqueAviso(r, els.length);
+    });
+}
+const certResumen = v => 'parcial ' + (v.f_certpct ? v.f_certpct + ' %' : v.f_certcant + ' ud/m') + (v.f_certdesc ? ' (' + v.f_certdesc + ')' : '');
+function bloqueBorrar(){
+  if(soloLectura()) return;
+  const els = selElementos(); if(!els.length) return;
+  if(!confirm('¿Borrar los ' + els.length + ' elementos seleccionados? (Se puede deshacer con ↶)')) return;
+  const ts = Date.now();
+  els.forEach(e => { e.borrado = ts; e.modificado = ts; });
+  registrarCambio('baja', 'Borrado en bloque · ' + els.length + ' elementos: ' + els.slice(0, 8).map(e => e.codigo || (getTipo(e.tipoId) || {}).nombre).join(', ') + (els.length > 8 ? '…' : ''), null, els.map(e => e.id));
+  selElems.clear(); save(); render();
 }
 
 /* ================= modal: alta / edición de elemento ================= */
@@ -7239,7 +8338,7 @@ function fotoWidget(hidden, ro){
   repaint();
   return wrap;
 }
-function nuevoElemento(id, prefill){
+function nuevoElemento(id, prefill, tabIni){
   const ex = id ? state.elementos.find(x => x.id === id) : null;
   if(!ex && soloLectura()) return;
   const ro = !!fechaVista;
@@ -7270,6 +8369,7 @@ function nuevoElemento(id, prefill){
       else if(c.tipo === 'photo'){ input = el('input', {type:'hidden', value:val}); extra = fotoWidget(input, ro); }
       else if(c.tipo === 'focos'){ input = el('input', {type:'hidden', value:val}); extra = focosWidget(input, ro); }
       else if(c.tipo === 'doc') input = el('input', {placeholder:'Nombre de archivo', value:val});
+      else if(c.tipo === 'lugar'){ input = selectLugar(c, val); if(input.options.length < 2) extra = el('div', {class:'hint', style:'margin:0 0 5px'}, 'No hay ' + (c.lugarTipo ? 'lugares de tipo ' + c.lugarTipo.toLowerCase() : 'lugares') + ': créalos en Esquema → Lugares.'); }
       else if(/observ|caracter/i.test(c.etiqueta)) input = el('textarea', {rows:2}, val);
       else input = el('input', {value:val});
       input.dataset.campo = c.id;
@@ -7302,15 +8402,72 @@ function nuevoElemento(id, prefill){
       if(!cambio) break;
     }
   }
-  selTipo.addEventListener('change', pintar);
+  /* certificación parcial: % o cantidad (al escribir en uno se vacía el otro) y lo que resulta */
+  function enlazarCertParcial(){
+    const iP = /** @type {HTMLInputElement} */ (camposWrap.querySelector('[data-campo="f_certpct"]'));
+    const iQ = /** @type {HTMLInputElement} */ (camposWrap.querySelector('[data-campo="f_certcant"]'));
+    if(!iP && !iQ) return;
+    const hint = el('div', {class:'hint', style:'margin-top:4px'});
+    (iQ || iP).parentElement.appendChild(hint);
+    const calc = () => {
+      const v = valoresActuales();
+      if(!numCampo(v.f_certpct) && !numCampo(v.f_certcant)){ hint.textContent = 'Rellena el % o la cantidad certificada: la otra sale sola.'; return; }
+      const m = medidaDe({tipoId:selTipo.value, valores:Object.assign({}, v, {f_cert:CERT_PARCIAL})});
+      hint.textContent = '= ' + fmtNum(m.cert, 2) + ' de ' + fmtNum(m.total, 2) + ' ' + m.unidad + ' (' + fmtNum(m.pct) + ' %)' +
+        (numCampo(v.f_certpct) > 100 ? ' · el % no puede pasar de 100' : '');
+    };
+    if(iP) iP.addEventListener('input', () => { if(iP.value && iQ) iQ.value = ''; calc(); });
+    if(iQ) iQ.addEventListener('input', () => { if(iQ.value && iP) iP.value = ''; calc(); });
+    camposWrap.addEventListener('input', calc);
+    calc();
+  }
+  selTipo.addEventListener('change', () => { pintar(); enlazarCertParcial(); });
   pintar();
+  enlazarCertParcial();
   camposWrap.addEventListener('change', aplicarReglas);
   camposWrap.addEventListener('input', aplicarReglas);
-  body.appendChild(el('div', {class:'cols2'},
-    el('div', {class:'field'}, el('span', {class:'flab'}, 'Tipo de elemento'), selTipo),
-    el('div', {class:'field'}, el('span', {class:'flab'}, 'Código'), inCod)
-  ));
-  body.appendChild(camposWrap);
+  const secDatos = el('div', null,
+    el('div', {class:'cols2'},
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Tipo de elemento'), selTipo),
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Código'), inCod)),
+    camposWrap);
+  if(ex){
+    /* pestañas: Datos · Documentos vinculados · Historial del propio elemento */
+    const hl = historialElemento(ex);
+    const secHist = panelHistorialElemento(ex, hl);
+    const barra = el('div', {class:'tabs'});
+    let actual = 'datos';
+    const etqDocs = () => 'Documentos (' + docsDe(ex).length + ')';
+    /* subir un documento cierra la ficha: si hay cambios sin guardar en Datos, se guardan antes */
+    const hayCambios = () => {
+      if(ro) return false;
+      if(inCod.value.trim() !== vStr(ex.codigo)) return true;
+      return [...camposWrap.querySelectorAll('[data-campo]')].some(inp => {
+        const fld = inp.closest('[data-fld]');
+        if(fld && /** @type {HTMLElement} */ (fld).style.display === 'none') return false;
+        return vStr(/** @type {HTMLInputElement} */ (inp).value).trim() !== vStr(ex.valores[/** @type {HTMLElement} */ (inp).dataset.campo]).trim();
+      });
+    };
+    const puedeSalir = () => {
+      if(!hayCambios()) return true;
+      if(!confirm('Hay cambios sin guardar en «Datos». Aceptar los guarda y sigue; Cancelar vuelve a la ficha.')) return false;
+      const g = modalEl && /** @type {HTMLElement} */ (modalEl.querySelector('.modal-f .btn.red'));
+      if(g) g.click();
+      return !modalEl;   /* si la validación falla, la ficha sigue abierta */
+    };
+    const secDocs = panelDocsElemento(ex, () => ver(actual), puedeSalir);
+    const pestanas = [['datos', () => 'Datos', secDatos], ['docs', etqDocs, secDocs], ['hist', () => 'Historial (' + hl.length + ')', secHist]];
+    const ver = k => {
+      actual = k; barra.innerHTML = '';
+      pestanas.forEach(([kk, txt, sec]) => {
+        sec.style.display = kk === k ? '' : 'none';
+        barra.appendChild(el('button', {type:'button', class:'btn sm ' + (kk === k ? 'red' : 'ghost'), onclick:() => ver(kk)}, txt()));
+      });
+    };
+    body.appendChild(barra);
+    pestanas.forEach(x => body.appendChild(x[2]));
+    ver(tabIni && pestanas.some(x => x[0] === tabIni) ? tabIni : 'datos');
+  } else body.appendChild(secDatos);
   openModal(ro ? 'Elemento (a ' + new Date(fechaVista).toLocaleDateString('es-ES') + ')' : (ex ? 'Editar elemento' : 'Nuevo elemento'), body,
     ro ? null : () => {
       const t = getTipo(selTipo.value);
@@ -7327,6 +8484,10 @@ function nuevoElemento(id, prefill){
         if(falla) ok = false;
       });
       if(!ok) return false;
+      if(valores.f_cert === CERT_PARCIAL && t.campos.some(r => r.campoId === 'f_certpct' || r.campoId === 'f_certcant')){
+        if(!(numCampo(valores.f_certpct) > 0) && !(numCampo(valores.f_certcant) > 0)){ alert('Certificación parcial: pon el % certificado o la cantidad certificada.'); return false; }
+        if(numCampo(valores.f_certpct) > 100){ alert('El % certificado no puede pasar de 100. Si está todo, elige «Certificado».'); return false; }
+      }
       if(ex){
         const nuevoCod = inCod.value.trim();
         const difs = [];
@@ -7340,9 +8501,7 @@ function nuevoElemento(id, prefill){
           else difs.push(c.etiqueta + ' "' + a + '"→"' + b + '"');
         });
         if(difs.length){
-          ex.hist = ex.hist || [];
-          ex.hist.push({ts:Date.now(), snap:{codigo:ex.codigo, valores:clone(ex.valores), plano:ex.plano ? clone(ex.plano) : null}});
-          if(ex.hist.length > 40) ex.hist.shift();
+          histGuardar(ex, Date.now(), 'ficha');
           ex.codigo = nuevoCod; ex.valores = valores; ex.modificado = Date.now();
           registrarCambio('edición', (ex.codigo || getTipo(ex.tipoId).nombre) + ': ' + difs.slice(0, 6).join('; ') + (difs.length > 6 ? '…' : ''), ex.id);
         }
@@ -7445,8 +8604,9 @@ async function exportXLSX(){
     for(let i = 0; i < RELLENO; i++) ws.addRow({codigo:''});
     const lastRow = 1 + filas.length + RELLENO;
     campos.forEach((c, idx) => {
-      if(c.tipo !== 'select' && c.tipo !== 'boolean') return;
-      const opts = c.tipo === 'boolean' ? ['Sí', 'No'] : (c.opciones || []);
+      if(c.tipo !== 'select' && c.tipo !== 'boolean' && c.tipo !== 'lugar') return;
+      const opts = c.tipo === 'boolean' ? ['Sí', 'No'] : c.tipo === 'lugar'
+        ? (proyActivo().lugares || []).filter(l => !c.lugarTipo || l.tipo === c.lugarTipo).map(l => l.nombre) : (c.opciones || []);
       if(!opts.length) return;
       const col = idx + 2; /* 1=Código */
       for(let r = 2; r <= lastRow; r++){
@@ -7454,6 +8614,26 @@ async function exportXLSX(){
       }
     });
   });
+  /* lugares con su tipo: al reimportar el Excel se recuperan (hoja «Lugares», como la de Diseño) */
+  const lugs = proyActivo().lugares || [];
+  if(lugs.length){
+    const wl = wb.addWorksheet('Lugares');
+    wl.columns = [{header:'Nombre', key:'n', width:24}, {header:'Tipo', key:'t', width:16}, {header:'PK inicio', key:'a', width:14}, {header:'PK fin', key:'b', width:14}];
+    wl.getRow(1).font = {bold:true};
+    lugs.slice().sort((a, b) => a.pkIni - b.pkIni).forEach(l => wl.addRow({n:l.nombre, t:l.tipo || 'Estación', a:toPkStr(l.pkIni), b:toPkStr(l.pkFin)}));
+  }
+  /* documentos y a qué elementos están vinculados (el archivo no va en el Excel) */
+  const docs = docsProy();
+  if(docs.length){
+    const wd = wb.addWorksheet('Documentos');
+    wd.columns = [{header:'Documento', key:'n', width:34}, {header:'Carpeta', key:'k', width:28}, {header:'Tipo', key:'t', width:18}, {header:'Fecha', key:'f', width:12},
+      {header:'Descripción', key:'d', width:30}, {header:'Archivo o enlace', key:'a', width:30}, {header:'Nº elementos', key:'c', width:12}, {header:'Elementos', key:'e', width:60}];
+    wd.getRow(1).font = {bold:true};
+    const prd = proyActivo(), ruta = d => docEnCarpeta(prd, d) ? carpetaTxt(prd, docEnCarpeta(prd, d)) : '';
+    docs.slice().sort((x, y) => ruta(x).localeCompare(ruta(y), 'es', {numeric:true}) || x.nombre.localeCompare(y.nombre, 'es', {numeric:true})).forEach(d => { const es = docElems(d);
+      wd.addRow({n:d.nombre, k:ruta(d), t:d.tipo || '', f:d.fecha || '', d:d.descripcion || '', a:d.archivo ? d.archivo.nombre : (d.enlace || ''), c:es.length,
+        e:es.map(e => (e.codigo || (getTipo(e.tipoId) || {}).nombre || '') + (e.valores.f_nserie ? ' (S/N ' + e.valores.f_nserie + ')' : '')).join(', ')}); });
+  }
   const buf = await wb.xlsx.writeBuffer();
   descargar((proyActivo().nombre || 'elementos').replace(/[^\w\-]+/g, '_') + '.xlsx', buf, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
 }
@@ -7499,8 +8679,10 @@ async function importarXLSXFile(file){
           if(viejos.length === 1) ex = viejos[0];
         }
         if(ex){
-          let cambio = false;
-          Object.keys(valores).forEach(cid => { if(!ex.valores[cid]){ ex.valores[cid] = valores[cid]; cambio = true; camposRellenados++; } });
+          const huecos = Object.keys(valores).filter(cid => !ex.valores[cid]);
+          const cambio = huecos.length > 0;
+          if(cambio) histGuardar(ex, now, 'Excel');
+          huecos.forEach(cid => { ex.valores[cid] = valores[cid]; camposRellenados++; });
           if(cambio){ ex.modificado = now; registrarCambio('edición (Excel)', (ex.codigo || t.nombre) + ': ' + Object.keys(valores).length + ' campo(s) revisados', ex.id); actualizados++; }
         } else if(algo || cod){
           const nid = uid();
@@ -7526,9 +8708,11 @@ async function importarXLSXFile(file){
         const g = k => c[k] ? celTexto(wsL.getRow(r).getCell(c[k]).value).trim() : '';
         const nom = g('nombre'), a = pkNum(g('pk inicio')), b = pkNum(g('pk fin'));
         if(!nom || !isFinite(a) || !isFinite(b)) continue;
-        const ya = prDest.lugares.find(l => String(l.nombre || '').toLowerCase() === nom.toLowerCase());
+        const tipo = g('tipo') || tipoLugarDefecto(nom);
+        if(!state.tiposLugar.includes(tipo)) state.tiposLugar.push(tipo);
+        const ya = prDest.lugares.find(l => String(l.nombre || '').toLowerCase() === nom.toLowerCase() && (l.tipo || 'Estación') === tipo);
         if(ya){ ya.pkIni = Math.min(a, b); ya.pkFin = Math.max(a, b); }
-        else { prDest.lugares.push({id:uid(), nombre:nom, pkIni:Math.min(a, b), pkFin:Math.max(a, b)}); nLug++; }
+        else { prDest.lugares.push({id:uid(), nombre:nom, tipo, pkIni:Math.min(a, b), pkFin:Math.max(a, b)}); nLug++; }
       }
     }
     const wsV = hojaPor('vias esquema');

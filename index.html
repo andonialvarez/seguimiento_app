@@ -14,6 +14,9 @@
     --amb:#e0a13c; --ambbg:#2c2413;
     --blu:#4d9de0; --blubg:#12263a;
     --rad:10px;
+    /* controles nativos en oscuro: sin esto, en Windows el desplegable de un <select> resalta la
+       opción bajo el ratón con fondo claro y la letra (clara) desaparece */
+    color-scheme:dark;
   }
   *{box-sizing:border-box}
   html,body{margin:0}
@@ -25,7 +28,7 @@
   input[type=checkbox]{width:auto}
   input[type=color]{padding:2px;height:38px}
   input[type=range]{padding:0}
-  select option{background:var(--panel2)}
+  select option{background:var(--panel2);color:var(--tx)}
   label{display:block}
 
   .topbar{display:flex;align-items:center;gap:22px;padding:12px 22px;background:var(--bg2);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:30;flex-wrap:wrap}
@@ -102,6 +105,7 @@
   .pill.green{background:var(--grnbg);color:var(--grn)}
   .pill.amber{background:var(--ambbg);color:var(--amb)}
   .pill.red{background:var(--redbg);color:var(--red)}
+  .pill.blue{background:var(--blubg);color:var(--blu)}
 
   .badge{display:inline-block;font-size:12px;padding:3px 9px;border-radius:7px;font-weight:600}
   .badge.gray{background:var(--panel3);color:var(--tx2)}
@@ -203,6 +207,38 @@
   .modal-h h2{font-size:16px}
   .modal-b{padding:18px;max-height:66vh;overflow:auto}
   .modal-f{display:flex;align-items:center;gap:8px;padding:13px 18px;border-top:1px solid var(--line);flex-wrap:wrap}
+  .tabs{display:flex;gap:2px;background:var(--panel3);border-radius:8px;padding:2px;width:max-content;max-width:100%;overflow-x:auto;margin-bottom:14px}
+
+  /* selección múltiple: casilla por fila + barra de acciones fija abajo */
+  td.selc,th.selc{width:34px;padding-right:0}
+  td.selc input,th.selc input{width:16px;height:16px;margin:2px 0 0;cursor:pointer}
+  tbody tr.selr{background:var(--redbg)}
+  tbody tr.selr:hover{background:#33202a}
+  .selbar{position:sticky;bottom:10px;z-index:25;margin-top:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--panel2);border:1px solid var(--red);border-radius:12px;padding:9px 12px;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+  .selbar select{width:auto;padding:5px 8px;font-size:12px}
+  .selbar .n{font-weight:700;font-size:13px}
+  /* documentos: árbol de carpetas a la izquierda y la carpeta abierta a la derecha */
+  .doclay{display:grid;grid-template-columns:230px minmax(0,1fr);gap:14px;align-items:start;margin-top:10px}
+  .dtree{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:6px;position:sticky;top:72px;max-height:calc(100vh - 90px);overflow:auto}
+  .dti{display:flex;align-items:center;gap:7px;padding:6px 8px;border-radius:7px;font-size:13px;cursor:pointer;color:var(--tx2)}
+  .dti:hover{background:var(--panel2);color:var(--tx)}
+  .dti.on{background:var(--panel3);color:var(--tx);font-weight:600}
+  .dti .grow{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dti .count{color:var(--tx3);font-size:11.5px;font-weight:400}
+  .icarp{display:inline-flex;color:var(--amb);flex:0 0 auto;vertical-align:-3px}
+  .migas{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:13.5px;margin-bottom:10px;min-height:30px}
+  .migas a{color:var(--tx2);text-decoration:none;padding:2px 5px;border-radius:5px}
+  .migas a:hover{color:var(--tx);background:var(--panel2)}
+  .migas b{padding:2px 5px}
+  .migas .sep{color:var(--tx3)}
+  .druta{color:var(--tx3);font-size:11.5px;margin-top:2px}
+  .dropok{outline:2px dashed var(--amb);outline-offset:-2px;background:var(--ambbg)!important}
+  td.dselc,th.dselc{width:34px;padding-right:0}
+  td.dselc input,th.dselc input{width:16px;height:16px;margin:2px 0 0;cursor:pointer}
+  .hlist{display:flex;flex-direction:column}
+  .hitem{display:flex;gap:10px;padding:9px 2px;border-bottom:1px solid var(--line);font-size:13px}
+  .hitem:last-child{border-bottom:0}
+  .hitem .hf{color:var(--tx3);font-size:12px;white-space:nowrap;min-width:118px}
 
   .ghpill{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 11px;border:1px solid var(--line2);background:var(--panel2);border-radius:8px;font-size:12px;font-weight:600}
   .ghpill .d{width:8px;height:8px;border-radius:50%;background:currentColor}
@@ -228,6 +264,10 @@
     .stats{grid-template-columns:1fr 1fr}
     .toolbar{gap:7px}
     .toolbar>.btn,.toolbar>select{flex:1 1 auto}
+    .selbar{bottom:6px;padding:8px 9px}
+    .hitem{flex-direction:column;gap:2px}
+    .doclay{grid-template-columns:minmax(0,1fr)}
+    .dtree{position:static;max-height:34vh}
     .overlay{padding:0}
     .modal{max-width:100%;min-height:100vh;border-radius:0;border:0}
     .modal-b{max-height:calc(100vh - 118px)}
