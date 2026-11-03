@@ -536,22 +536,26 @@ async function syncPull(silent){
   }
   ghBusy = false;
 }
+/* cambia en obj las fotos (data:image…) por «##foto:id» y sube a fotos/ las que aún no estén */
+async function ghSubirFotos(obj){
+  const fotos = {};
+  walkStrings(obj, s => { if(/^data:image\//.test(s)){ const id = fotoId(s); fotos[id] = s; return '##foto:' + id; } return s; });
+  for(const id in fotos){
+    const chk = await ghApi('/contents/fotos/' + id + '.jpg?ref=' + encodeURIComponent(GH.branch));
+    if(chk.status === 200) continue;
+    const b64 = fotos[id].replace(/^data:image\/[^;]+;base64,/, '');
+    const put = await ghApi('/contents/fotos/' + id + '.jpg', { method: 'PUT',
+      body: JSON.stringify({ message: 'foto ' + id, content: b64, branch: GH.branch }) });
+    if(!put.ok && put.status !== 422) throw new Error('foto ' + id + ': ' + put.status);
+  }
+}
 async function syncPush(){
   if(!GH.on || ghBusy) return;
   if(!navigator.onLine){ setGhStatus('offline'); return; }
   ghBusy = true; setGhStatus('busy');
   try{
     const clone = JSON.parse(JSON.stringify(state));
-    const fotos = {};
-    walkStrings(clone, s => { if(/^data:image\//.test(s)){ const id = fotoId(s); fotos[id] = s; return '##foto:' + id; } return s; });
-    for(const id in fotos){
-      const chk = await ghApi('/contents/fotos/' + id + '.jpg?ref=' + encodeURIComponent(GH.branch));
-      if(chk.status === 200) continue;
-      const b64 = fotos[id].replace(/^data:image\/[^;]+;base64,/, '');
-      const put = await ghApi('/contents/fotos/' + id + '.jpg', { method: 'PUT',
-        body: JSON.stringify({ message: 'foto ' + id, content: b64, branch: GH.branch }) });
-      if(!put.ok && put.status !== 422) throw new Error('foto ' + id + ': ' + put.status);
-    }
+    await ghSubirFotos(clone);
     await ghSubirDocsPendientes();
     const rev = Date.now();
     clone.__rev = rev; clone.__device = ghDevice();
@@ -665,8 +669,12 @@ function elementosProy(){
     .filter(e => f ? ((e.creado || 0) <= f && !(e.borrado && e.borrado <= f)) : !e.borrado)
     .map(e => { if(!f) return e; const s = estadoEnFecha(e, f); return Object.assign({}, e, {codigo:s.codigo, valores:s.valores || {}, plano:s.plano || null}); });
 }
+/* solo lectura: viendo a una fecha pasada o proyecto finalizado (sin avisar; soloLectura() avisa) */
+const soloVer = () => !!fechaVista || !!(proyActivo() || {}).finalizado;
 function soloLectura(){
   if(fechaVista){ alert('Estás viendo el proyecto a una fecha pasada (solo lectura). Pulsa "Hoy" para volver y editar.'); return true; }
+  const pr = proyActivo();
+  if(pr && pr.finalizado){ alert('El proyecto «' + pr.nombre + '» está finalizado (solo lectura). Pulsa «Reabrir» arriba para editarlo.'); return true; }
   return false;
 }
 /* refs: varios elementos a la vez (edición en bloque, vinculación de documentos) */
@@ -1073,12 +1081,20 @@ function renderSub(){
     fechaVista ? el('button', {class:'btn sm', onclick:() => { fechaVista = null; render(); }}, 'Hoy') : null);
   sub.appendChild(dWrap);
 
+  const prAct = proyActivo(), nArch = (state.archivados || []).length;
   sub.appendChild(el('div', {class:'proj'},
     el('span', {class:'lab'}, modoActual() === 'diseno' ? 'Proyecto (diseño)' : 'Proyecto'),
     el('select', {onchange:e => { state.proyectoActivo = e.target.value; save(); render(); }},
-      ...proyectosDelModo().map(p => el('option', {value:p.id, ...(p.id === state.proyectoActivo ? {selected:'selected'} : {})}, p.nombre))),
-    el('button', {class:'btn sm', onclick:() => nuevoProyectoModal()}, '+ Nuevo')
+      ...proyectosDelModo().map(p => el('option', {value:p.id, ...(p.id === state.proyectoActivo ? {selected:'selected'} : {})}, (p.finalizado ? '✓ ' : '') + p.nombre))),
+    el('button', {class:'btn sm', onclick:() => nuevoProyectoModal()}, '+ Nuevo'),
+    prAct && !prAct.finalizado ? el('button', {class:'btn sm', title:'Dar por terminado este proyecto (queda en solo lectura y se puede archivar)', onclick:() => finalizarProyecto(prAct.id)}, 'Finalizar') : null,
+    el('button', {class:'btn sm ghost', title:'Proyectos archivados', onclick:verArchivados}, 'Archivo' + (nArch ? ' (' + nArch + ')' : ''))
   ));
+  if(prAct && prAct.finalizado) sub.appendChild(el('div', {style:'width:100%;margin-top:8px;padding:6px 12px;background:var(--grnbg);color:var(--grn);border-radius:8px;font-size:12px;font-weight:600;display:flex;gap:10px;align-items:center;flex-wrap:wrap'},
+    el('span', null, 'Proyecto finalizado el ' + new Date(prAct.finalizado).toLocaleDateString('es-ES') + (modoActual() === 'diseno' ? '' : ' · solo lectura')),
+    el('span', {class:'spacer'}),
+    el('button', {class:'btn sm', onclick:() => archivarProyecto(prAct.id)}, 'Archivar…'),
+    el('button', {class:'btn sm', onclick:() => reabrirProyecto(prAct.id)}, 'Reabrir')));
   const ra = modoActual() === 'diseno' ? null : repActivo();
   if(ra) sub.appendChild(el('div', {style:'width:100%;margin-top:8px;padding:6px 12px;background:var(--ambbg);color:var(--amb);border-radius:8px;font-size:12px;font-weight:600;display:flex;gap:10px;align-items:center;flex-wrap:wrap'},
     el('span', null, 'Replanteo en curso: ' + ra.nombre + ' · lo que añadas, borres o modifiques queda registrado en él'),
@@ -1139,6 +1155,192 @@ function borrarProyecto(id){
   if(state.proyectoActivo === id) state.proyectoActivo = null;
   asegurarProyectoModo();
   save(); render();
+}
+
+/* ================= finalizar y archivar proyectos ================= */
+/* Un proyecto finalizado queda en solo lectura. Archivarlo lo saca de proyecto.json y de este
+   navegador, para que no crezcan sin fin: se guarda entero en archivo/<id>.json del repositorio de
+   datos (fotos en fotos/ y documentos en documentos/, como en la sincronización) y, si se pide, en
+   un .json descargado que lleva dentro fotos y documentos y no depende de nada más. En
+   state.archivados queda solo una ficha por proyecto para listarlo y recuperarlo. */
+const ARCH_FORMATO = 'via-archivo';
+const archRuta = id => 'archivo/' + id + '.json';
+const fechaCorta = ts => ts ? new Date(ts).toLocaleDateString('es-ES') : '—';
+function finalizarProyecto(id){
+  const pr = state.proyectos.find(p => p.id === id); if(!pr || pr.finalizado) return;
+  if(!confirm('¿Dar por finalizado el proyecto «' + pr.nombre + '»?\n\nQuedará en solo lectura. Podrás reabrirlo cuando quieras, o archivarlo para que deje de ocupar sitio en la app.')) return;
+  pr.finalizado = Date.now();
+  registrarCambio('proyecto', 'proyecto finalizado');
+  save(); render();
+}
+function reabrirProyecto(id){
+  const pr = state.proyectos.find(p => p.id === id); if(!pr || !pr.finalizado) return;
+  if(!confirm('¿Reabrir «' + pr.nombre + '» para volver a editarlo?')) return;
+  delete pr.finalizado;
+  registrarCambio('proyecto', 'proyecto reabierto');
+  save(); render();
+}
+/* mete en el paquete los archivos de sus documentos (de este navegador o del repositorio) */
+async function archMeterArchivos(pq){
+  pq.archivos = {}; pq.faltan = [];
+  for(const d of (pq.proyecto.documentos || [])){
+    const a = d.archivo; if(!a || !a.hash || pq.archivos[a.hash]) continue;
+    try{ const blob = await docObtener(d); pq.archivos[a.hash] = {mime:a.mime || blob.type || '', b64:await blobB64(blob)}; }
+    catch(e){ pq.faltan.push(d.nombre || a.nombre || a.hash); }
+  }
+}
+/* el modelo de datos va entero (son pocos KB) para que el proyecto se lea igual aunque luego cambie */
+async function archPaquete(pr, conArchivos){
+  const pq = {formato:ARCH_FORMATO, version:1, exportado:Date.now(), dispositivo:ghDevice(),
+    proyecto:clone(pr), elementos:clone(state.elementos.filter(e => e.proyectoId === pr.id)),
+    modelo:{campos:clone(state.campos), elementTypes:clone(state.elementTypes), tiposLugar:tiposLugar().slice(), tiposDoc:tiposDoc().slice()}};
+  if(conArchivos){
+    if(GH.on) await ghRehidratarFotos(pq);   /* por si alguna foto no llegó a bajar a este dispositivo */
+    await archMeterArchivos(pq);
+  }
+  return pq;
+}
+function archNombreFichero(nombre){
+  const n = String(nombre || 'proyecto').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return 'Via-archivo_' + (n || 'proyecto') + '_' + new Date().toISOString().slice(0, 10) + '.json';
+}
+async function ghGuardarArchivo(pq){
+  const ruta = archRuta(pq.proyecto.id);
+  const chk = await ghApi('/contents/' + ruta + '?ref=' + encodeURIComponent(GH.branch) + '&t=' + Date.now());
+  const body = {message:'archivo ' + pq.proyecto.nombre, content:b64EncUtf8(JSON.stringify(pq)), branch:GH.branch};
+  if(chk.status === 200) body.sha = (await chk.json()).sha;
+  const put = await ghApi('/contents/' + ruta, {method:'PUT', body:JSON.stringify(body)});
+  if(!put.ok) throw new Error('GitHub ' + put.status + ' ' + (await put.text()).slice(0, 160));
+}
+async function ghBajarArchivo(id){
+  const r = await ghApi('/contents/' + archRuta(id) + '?ref=' + encodeURIComponent(GH.branch) + '&t=' + Date.now());
+  if(!r.ok) throw new Error(r.status === 404 ? 'no está en el repositorio (' + archRuta(id) + ')' : 'GitHub ' + r.status);
+  const pq = JSON.parse(b64DecUtf8(await ghContenidoB64(await r.json())));
+  await ghRehidratarFotos(pq);
+  return pq;
+}
+function archivarProyecto(id){
+  const pr = state.proyectos.find(p => p.id === id); if(!pr) return;
+  if(!pr.finalizado){ alert('Primero finaliza el proyecto.'); return; }
+  const n = state.elementos.filter(e => e.proyectoId === id).length, nd = (pr.documentos || []).length;
+  const chk = el('input', {type:'checkbox', checked:'checked', ...(GH.on ? {} : {disabled:'disabled'})});
+  const estado = el('div', {style:'margin-top:10px;font-size:12px;color:var(--tx2)'});
+  openModal('Archivar proyecto', el('div', null,
+    el('p', null, '«' + pr.nombre + '» (' + n + ' elementos' + (nd ? ', ' + nd + ' documentos' : '') + ') dejará de verse en la app y de ocupar sitio en la sincronización. Se recupera entero desde «Archivo», arriba.'),
+    el('p', null, GH.on ? 'Se guarda una copia completa en el repositorio de datos (' + GH.repo + ', carpeta archivo/).'
+      : 'La sincronización no está configurada: la única copia será el archivo que se descarga ahora. Guárdalo en un sitio seguro.'),
+    el('label', {style:'display:flex;gap:8px;align-items:center;margin-top:8px'}, chk,
+      el('span', null, 'Descargar también una copia en este dispositivo (.json con fotos y documentos dentro)')),
+    estado), () => {
+    const btn = /** @type {HTMLButtonElement} */ (modalEl.querySelector('.modal-f .btn.red'));
+    btn.disabled = true;
+    archivarEjecutar(pr, chk.checked || !GH.on, t => { estado.textContent = t; })
+      .then(ok => { if(ok) closeModal(); else btn.disabled = false; });
+    return false;
+  });
+  modalEl.querySelector('.modal-f .btn.red').textContent = 'Archivar';
+}
+async function archivarEjecutar(pr, descargarCopia, aviso){
+  try{
+    let enRepo = false, fichero = '', faltan = [];
+    if(GH.on){
+      if(!navigator.onLine) throw new Error('no hay conexión, y hace falta para guardarlo en el repositorio.');
+      aviso('Subiendo documentos pendientes…');
+      await ghSubirDocsPendientes();
+      const pq = await archPaquete(pr, false);
+      aviso('Subiendo fotos…');
+      await ghSubirFotos(pq);
+      aviso('Guardando el proyecto en el repositorio…');
+      await ghGuardarArchivo(pq);
+      enRepo = true;
+    }
+    if(descargarCopia){
+      aviso('Preparando la copia descargable…');
+      const pq = await archPaquete(pr, true);
+      faltan = pq.faltan;
+      fichero = archNombreFichero(pr.nombre);
+      descargar(fichero, JSON.stringify(pq), 'application/json');
+    }
+    const n = state.elementos.filter(e => e.proyectoId === pr.id).length;
+    state.archivados = (state.archivados || []).filter(a => a.id !== pr.id).concat({id:pr.id, nombre:pr.nombre, modo:pr.modo || 'seguimiento',
+      creado:pr.creado, finalizado:pr.finalizado, archivado:Date.now(), elementos:n, documentos:(pr.documentos || []).length, enRepo, fichero});
+    state.proyectos = state.proyectos.filter(p => p.id !== pr.id);
+    state.elementos = state.elementos.filter(e => e.proyectoId !== pr.id);
+    if(state.proyectoActivo === pr.id) state.proyectoActivo = null;
+    fechaVista = null;
+    asegurarProyectoModo(); save(); render();
+    if(faltan.length) alert('Archivado. Estos documentos no se pudieron meter en la copia descargada' + (enRepo ? ' (siguen en el repositorio)' : '') + ':\n· ' + faltan.join('\n· '));
+    return true;
+  }catch(e){
+    aviso('');
+    alert('No se ha archivado: ' + e.message + '\nEl proyecto sigue en la app, sin cambios.');
+    return false;
+  }
+}
+/* vuelve a meter en la app un paquete archivado (del repositorio o de un .json descargado) */
+async function archRestaurar(pq){
+  if(!pq || pq.formato !== ARCH_FORMATO || !pq.proyecto || !Array.isArray(pq.elementos)) throw new Error('el archivo no es un proyecto archivado de Vía.');
+  const pr = pq.proyecto, id = pr.id;
+  if(state.proyectos.some(p => p.id === id) && !confirm('«' + pr.nombre + '» ya está en la app. ¿Sustituirlo por la copia archivada?')) return false;
+  for(const h in (pq.archivos || {})){ try{ await docGuardarLocal(h, b64Blob(pq.archivos[h].b64, pq.archivos[h].mime)); }catch(e){} }
+  const m = pq.modelo || {};
+  (m.campos || []).forEach(c => { if(!state.campos.some(x => x.id === c.id)) state.campos.push(c); });
+  (m.elementTypes || []).forEach(t => { if(!state.elementTypes.some(x => x.id === t.id)) state.elementTypes.push(t); });
+  if(m.tiposLugar) state.tiposLugar = [...new Set(tiposLugar().concat(m.tiposLugar))];
+  if(m.tiposDoc) state.tiposDoc = [...new Set(tiposDoc().concat(m.tiposDoc))];
+  state.proyectos = state.proyectos.filter(p => p.id !== id).concat(pr);
+  state.elementos = state.elementos.filter(e => e.proyectoId !== id).concat(pq.elementos);
+  state.archivados = (state.archivados || []).filter(a => a.id !== id);
+  state.modo = pr.modo === 'diseno' ? 'diseno' : 'seguimiento';
+  state.proyectoActivo = id; fechaVista = null;
+  currentView = state.modo === 'diseno' ? 'entrada' : 'resumen';
+  registrarCambio('proyecto', 'proyecto recuperado del archivo');
+  migrar(); save(); render();
+  return true;
+}
+function verArchivados(){
+  const lista = (state.archivados || []).slice().sort((a, b) => (b.archivado || 0) - (a.archivado || 0));
+  const estado = el('div', {style:'margin-top:8px;font-size:12px;color:var(--tx2)'});
+  const ocupado = async (txt, fn) => { estado.textContent = txt; try{ await fn(); estado.textContent = ''; }catch(e){ estado.textContent = ''; alert('No se pudo: ' + e.message); } };
+  const inp = /** @type {HTMLInputElement} */ (el('input', {type:'file', accept:'.json,application/json', style:'display:none'}));
+  inp.addEventListener('change', () => {
+    const f = inp.files[0]; inp.value = ''; if(!f) return;
+    ocupado('Leyendo ' + f.name + '…', async () => { if(await archRestaurar(JSON.parse(await f.text()))) closeModal(); });
+  });
+  const recuperar = a => {
+    if(!a.enRepo){ alert('De «' + a.nombre + '» solo hay copia en el archivo descargado' + (a.fichero ? ' (' + a.fichero + ')' : '') + '. Elígelo a continuación.'); inp.click(); return; }
+    if(!GH.on){ alert('La copia de «' + a.nombre + '» está en el repositorio de datos: configura la sincronización (Ajustes → Sincronización) o recupéralo desde un .json descargado.'); return; }
+    ocupado('Bajando «' + a.nombre + '» del repositorio…', async () => { if(await archRestaurar(await ghBajarArchivo(a.id))) closeModal(); });
+  };
+  const bajar = a => ocupado('Preparando la copia de «' + a.nombre + '»…', async () => {
+    const pq = await ghBajarArchivo(a.id);
+    await archMeterArchivos(pq);
+    descargar(archNombreFichero(a.nombre), JSON.stringify(pq), 'application/json');
+    if(pq.faltan.length) alert('Documentos que no se pudieron meter en la copia:\n· ' + pq.faltan.join('\n· '));
+  });
+  const quitar = a => {
+    if(!confirm('¿Quitar «' + a.nombre + '» de esta lista?\n\n' + (a.enRepo ? 'La copia del repositorio (' + archRuta(a.id) + ') no se borra.' : 'Solo quedará el archivo descargado.'))) return;
+    state.archivados = (state.archivados || []).filter(x => x.id !== a.id); save(); render(); verArchivados();
+  };
+  const body = el('div', null,
+    lista.length ? null : el('p', {style:'color:var(--tx2)'}, 'No hay proyectos archivados. Para archivar uno, finalízalo y pulsa «Archivar…».'),
+    ...lista.map(a => el('div', {style:'padding:8px 0;border-top:1px solid var(--line)'},
+      el('div', {style:'display:flex;gap:8px;align-items:center;flex-wrap:wrap'},
+        el('strong', null, a.nombre),
+        el('span', {class:'badge gray'}, a.modo === 'diseno' ? 'Diseño' : 'Seguimiento'),
+        el('span', {style:'flex:1'}),
+        el('button', {class:'btn sm', onclick:() => recuperar(a)}, 'Recuperar'),
+        a.enRepo && GH.on ? el('button', {class:'btn sm ghost', title:'Descargar un .json con fotos y documentos', onclick:() => bajar(a)}, 'Descargar') : null,
+        el('button', {class:'btn sm ghost danger', title:'Quitar de la lista', onclick:() => quitar(a)}, '✕')),
+      el('div', {style:'font-size:12px;color:var(--tx3);margin-top:3px'},
+        (a.elementos || 0) + ' elementos · finalizado ' + fechaCorta(a.finalizado) + ' · archivado ' + fechaCorta(a.archivado) + ' · ' +
+        (a.enRepo ? 'copia en el repositorio' : 'solo en el archivo descargado' + (a.fichero ? ' (' + a.fichero + ')' : ''))))),
+    el('div', {style:'margin-top:12px;padding-top:10px;border-top:1px solid var(--line)'},
+      el('button', {class:'btn sm', onclick:() => inp.click()}, 'Recuperar desde un archivo .json…'), inp, estado));
+  openModal('Proyectos archivados', body, null);
+  const f = modalEl.querySelector('.modal-f');
+  f.querySelector('.btn.red').textContent = 'Cerrar';
+  f.querySelectorAll('.btn:not(.red)').forEach(b => b.remove());
 }
 
 /* ================= modo Diseño de obra (NAS 811) ================= */
@@ -4325,7 +4527,7 @@ function viewCertificaciones(){
   });
   const thS = (label, col) => el('th', {class:'sortable', onclick:() => { if(certSort.col === col) certSort.dir *= -1; else { certSort.col = col; certSort.dir = 1; } render(); }},
     label, el('span', {class:'arw'}, certSort.col === col ? (certSort.dir > 0 ? '▲' : '▼') : '⇅'));
-  const conSel = !fechaVista;
+  const conSel = !soloVer();
   const w4 = el('div', {class:'tablewrap'});
   w4.appendChild(el('table', null,
     el('thead', null, el('tr', null, conSel ? selCabecera(filas.map(e => e.id)) : null, thS('Código', 'codigo'), thS('Tipo', 'tipo'), thS('PK', 'pk'), thS('Certificación', 'cert'), el('th', null, 'Certificado'), thS('Acopio', 'acopio'), thS('Estado', 'estado'), el('th', null, ''))),
@@ -4378,7 +4580,7 @@ function viewHistorial(){
       el('td', null, x.detalle || '—'),
       el('td', null, x.ref && state.elementos.some(e => e.id === x.ref && !e.borrado)
         ? el('button', {class:'btn sm', onclick:() => nuevoElemento(x.ref)}, 'Abrir')
-        : (x.refs && x.refs.length && !fechaVista) ? el('button', {class:'btn sm', title:'Marcar estos elementos en la Base de datos', onclick:() => {
+        : (x.refs && x.refs.length && !soloVer()) ? el('button', {class:'btn sm', title:'Marcar estos elementos en la Base de datos', onclick:() => {
             selVigente(); selElems.clear();
             x.refs.forEach(id => { if(state.elementos.some(e => e.id === id && !e.borrado)) selElems.add(id); });
             if(!selElems.size){ alert('Esos elementos ya no existen.'); return; }
@@ -4495,7 +4697,7 @@ function viewInstalados(c){
     c.appendChild(w2);
   }
   c.appendChild(el('p', {class:'hint'}, 'La fecha de instalación sale de la «Fecha de instalación» del elemento si está rellena; si no, del momento en que su estado pasó a Instalado o Verificado. Para avances antiguos registrados tarde, rellena la «Fecha de instalación».'));
-  if(enPer.length && !fechaVista) c.appendChild(barraSeleccion());
+  if(enPer.length && !soloVer()) c.appendChild(barraSeleccion());
   return c;
 }
 
@@ -6840,7 +7042,7 @@ function esquemaCanvas(conPk, sinPk, elsAll){
     if(ev.button !== 0) return;
     if(esqDibVia || esqAdd.on) return;
     const g = ev.target.closest('[data-el]');
-    if(!g || fechaVista){
+    if(!g || soloVer()){
       if(Date.now() - tUltimo < 800) return;   /* viene de un dedo: lo desplaza el navegador */
       /* arrastrar sobre el fondo = desplazar el esquema (no hace falta el botón derecho) */
       const sx = ev.clientX, sy = ev.clientY, sl = box.scrollLeft, st = box.scrollTop;
@@ -7332,7 +7534,7 @@ function viewBD(){
       render();
     }}, label, el('span', {class:'arw'}, bdSort.col === col ? (bdSort.dir > 0 ? '▲' : '▼') : '⇅'));
 
-  const conSel = !fechaVista;
+  const conSel = !soloVer();
   const wrap = el('div', {class:'tablewrap'});
   wrap.appendChild(el('table', null,
     el('thead', null, el('tr', null, conSel ? selCabecera(filas.map(e => e.id)) : null, ...cols.map(k => thS(bdColDef(k).lbl, k)), el('th', null, ''))),
@@ -7516,14 +7718,14 @@ function carpetaMover(c, destino){
 /* arrastrar documentos (todos los marcados si el arrastrado lo está) o carpetas sobre una carpeta */
 let docArrastre = null;   /* {docs:[ids]} o {carpeta:id} */
 function arrastrable(n, dato){
-  if(fechaVista) return n;
+  if(soloVer()) return n;
   n.setAttribute('draggable', 'true');
   n.addEventListener('dragstart', ev => { docArrastre = dato(); if(ev.dataTransfer){ ev.dataTransfer.effectAllowed = 'move'; try{ ev.dataTransfer.setData('text/plain', 'via-doc'); }catch(e){} } });
   n.addEventListener('dragend', () => { docArrastre = null; document.querySelectorAll('.dropok').forEach(x => x.classList.remove('dropok')); });
   return n;
 }
 function destinoCarpeta(n, id){
-  if(fechaVista) return n;
+  if(soloVer()) return n;
   n.addEventListener('dragover', ev => { if(!docArrastre) return; ev.preventDefault(); if(ev.dataTransfer) ev.dataTransfer.dropEffect = 'move'; n.classList.add('dropok'); });
   n.addEventListener('dragleave', () => n.classList.remove('dropok'));
   n.addEventListener('drop', ev => {
@@ -7539,7 +7741,7 @@ function destinoCarpeta(n, id){
 function docMarcadosVigentes(pr){ const ids = new Set(docsProy(pr).map(d => d.id)); [...docMarcados].forEach(id => { if(!ids.has(id)) docMarcados.delete(id); }); return docMarcados; }
 function docBarra(){
   const pr = proyActivo(), n = docMarcadosVigentes(pr).size;
-  if(!n || fechaVista) return el('div', {id:'docbar', style:'display:none'});
+  if(!n || soloVer()) return el('div', {id:'docbar', style:'display:none'});
   const iDest = el('select', {title:'Mover los documentos marcados', onchange:ev => {
     const v = ev.target.value; if(v === '__') return;
     const m = docMover([...docMarcados], v);
@@ -7843,10 +8045,10 @@ function panelDocsElemento(e, alCambiar, puedeSalir){
         el('span', {class:'grow'}, el('b', null, d.nombre), el('span', {style:'color:var(--tx3);font-size:12px'}, ' · ' + (d.tipo || '') + (d.fecha ? ' · ' + docFecha(d) : '') +
           (docEnCarpeta(proyActivo(), d) ? ' · ' + carpetaTxt(proyActivo(), docEnCarpeta(proyActivo(), d)) : ''))),
         el('button', {type:'button', class:'btn sm', onclick:() => docAbrir(d)}, d.archivo ? 'Abrir' : 'Ir al enlace'),
-        fechaVista ? null : el('button', {type:'button', class:'btn sm danger', title:'Desvincular de este elemento', onclick:() => { docVincular(d, [e.id], false); save(); pinta(); if(alCambiar) alCambiar(); }}, '✕'))));
+        soloVer() ? null : el('button', {type:'button', class:'btn sm danger', title:'Desvincular de este elemento', onclick:() => { docVincular(d, [e.id], false); save(); pinta(); if(alCambiar) alCambiar(); }}, '✕'))));
       box.appendChild(lista);
     } else box.appendChild(el('div', {class:'empty', style:'padding:14px'}, 'Sin documentos vinculados.'));
-    if(fechaVista) return;
+    if(soloVer()) return;
     const libres = docsProy().filter(d => !ds.includes(d));
     if(libres.length){
       const iDoc = el('select', {style:'flex:1;min-width:0'}, ...docOpciones(proyActivo(), libres));
@@ -7863,7 +8065,7 @@ function panelDocsElemento(e, alCambiar, puedeSalir){
   return box;
 }
 function viewDocumentos(){
-  const c = el('div', null), pr = proyActivo(), docs = docsProy(pr), ro = !!fechaVista;
+  const c = el('div', null), pr = proyActivo(), docs = docsProy(pr), ro = soloVer();
   if(docCarpeta && !carpetaDe(pr, docCarpeta)) docCarpeta = '';
   docMarcadosVigentes(pr);
   c.appendChild(el('div', {class:'sec-title'}, 'Documentos y certificados', el('span', {class:'muted'}, pr.nombre + ' · ' + docs.length + ' documentos'),
@@ -7986,7 +8188,7 @@ function viewDocumentos(){
   const ord = els.slice().sort((a, b) => ((getTipo(a.tipoId) || {}).nombre || '').localeCompare((getTipo(b.tipoId) || {}).nombre || '', 'es') || vStr(a.codigo).localeCompare(vStr(b.codigo), 'es', {numeric:true}));
   const w2 = el('div', {class:'tablewrap'});
   w2.appendChild(el('table', null,
-    el('thead', null, el('tr', null, fechaVista ? null : selCabecera(ord.map(e => e.id)), el('th', null, 'Código'), el('th', null, 'Tipo'), el('th', null, 'PK / Nº de serie'), el('th', null, 'Lugar'), el('th', null, 'Estado'), el('th', null, 'Vinculado'), el('th', null, ''))),
+    el('thead', null, el('tr', null, soloVer() ? null : selCabecera(ord.map(e => e.id)), el('th', null, 'Código'), el('th', null, 'Tipo'), el('th', null, 'PK / Nº de serie'), el('th', null, 'Lugar'), el('th', null, 'Estado'), el('th', null, 'Vinculado'), el('th', null, ''))),
     el('tbody', null, ...ord.map(e => {
       const t = getTipo(e.tipoId) || {}, est = valorEstado(e);
       const celdas = [
@@ -7997,11 +8199,11 @@ function viewDocumentos(){
         el('td', null, est ? el('span', {class:'badge ' + estadoBadgeClass(est)}, est) : '—'),
         el('td', {style:'color:var(--tx3);font-size:12px;white-space:nowrap'}, new Date(d.elementos[e.id]).toLocaleDateString('es-ES')),
         el('td', {style:'white-space:nowrap'}, el('button', {class:'btn sm', onclick:() => nuevoElemento(e.id)}, 'Abrir'), ' ',
-          fechaVista ? null : el('button', {class:'btn sm danger', title:'Desvincular', onclick:() => { docVincular(d, [e.id], false); save(); render(); }}, '✕'))];
-      return fechaVista ? el('tr', null, ...celdas) : selFila(e, ...celdas);
+          soloVer() ? null : el('button', {class:'btn sm danger', title:'Desvincular', onclick:() => { docVincular(d, [e.id], false); save(); render(); }}, '✕'))];
+      return soloVer() ? el('tr', null, ...celdas) : selFila(e, ...celdas);
     }))));
   c.appendChild(w2);
-  if(!fechaVista) c.appendChild(barraSeleccion());
+  if(!soloVer()) c.appendChild(barraSeleccion());
   return c;
 }
 
@@ -8125,7 +8327,7 @@ function selRefrescar(){
 }
 function barraSeleccion(){
   const els = selElementos();
-  if(!els.length || fechaVista) return el('div', {id:'selbar', style:'display:none'});
+  if(!els.length || soloVer()) return el('div', {id:'selbar', style:'display:none'});
   const fuera = els.filter(e => !selVisibles.includes(e.id)).length;
   const conCampo = cid => els.filter(e => (getTipo(e.tipoId) || {campos:[]}).campos.some(r => r.campoId === cid)).length;
   const rapido = (cid, rotulo) => {
@@ -8341,8 +8543,8 @@ function fotoWidget(hidden, ro){
 function nuevoElemento(id, prefill, tabIni){
   const ex = id ? state.elementos.find(x => x.id === id) : null;
   if(!ex && soloLectura()) return;
-  const ro = !!fechaVista;
-  const exVal = ex ? (ro ? estadoEnFecha(ex, fechaVista) : {codigo:ex.codigo, valores:ex.valores}) : null;
+  const ro = soloVer();
+  const exVal = ex ? (fechaVista ? estadoEnFecha(ex, fechaVista) : {codigo:ex.codigo, valores:ex.valores}) : null;
   let tipoId = ex ? ex.tipoId : ((prefill && prefill.tipoId) || (state.elementTypes[0] && state.elementTypes[0].id));
   if(!tipoId){ alert('Primero crea un tipo de elemento en "Modelo de datos".'); return; }
   const body = el('div', null);
@@ -8468,7 +8670,7 @@ function nuevoElemento(id, prefill, tabIni){
     pestanas.forEach(x => body.appendChild(x[2]));
     ver(tabIni && pestanas.some(x => x[0] === tabIni) ? tabIni : 'datos');
   } else body.appendChild(secDatos);
-  openModal(ro ? 'Elemento (a ' + new Date(fechaVista).toLocaleDateString('es-ES') + ')' : (ex ? 'Editar elemento' : 'Nuevo elemento'), body,
+  openModal(fechaVista ? 'Elemento (a ' + new Date(fechaVista).toLocaleDateString('es-ES') + ')' : ro ? 'Elemento (proyecto finalizado)' : (ex ? 'Editar elemento' : 'Nuevo elemento'), body,
     ro ? null : () => {
       const t = getTipo(selTipo.value);
       let ok = true; const valores = {};
