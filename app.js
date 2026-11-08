@@ -190,6 +190,8 @@ function defaultPatrones(){
 /* ================= persistencia + undo ================= */
 const KEY = 'via-seguimiento-v3';
 let state, ultimoSnap = null, undoStack = [], redoStack = [];
+/* campos de PK del sistema: su tipo no se puede cambiar (ver final de migrar y editarCampo) */
+const CAMPOS_PK = ['f_pk', 'f_pkini', 'f_pkfin'];
 function migrar(){
   if(!state || !state.campos || !state.elementTypes) state = semilla();
   if(!state.elementos) state.elementos = [];
@@ -429,6 +431,11 @@ function migrar(){
     else state.elementTypes.push({id:'t_tarj', nombre:'Tarjeta', prefijo:'TJ', color:'#2bb3a6', campos});
     state.tarjetaV1 = true;
   }
+  /* PK, PK inicio y PK fin son de tipo «PK» siempre: el esquema, el plano, los replanteos y los
+     lugares localizan el PK de un elemento por el TIPO del campo. Si se cambiaban a Texto o Número
+     en el modelo de datos, todos los elementos desaparecían del esquema (ni «con PK» ni «sin PK»).
+     Sin bandera: también corrige lo que llegue sincronizado desde un equipo con una versión vieja. */
+  CAMPOS_PK.forEach(id => { const c = state.campos.find(x => x.id === id); if(c && c.tipo !== 'pk') c.tipo = 'pk'; });
 }
 function load(){
   try{ const raw = localStorage.getItem(KEY); state = raw ? JSON.parse(raw) : semilla(); }
@@ -7317,7 +7324,8 @@ function editarCampo(id, tipoParaAnadir){
   const cp = esNuevo ? {id:uid(), etiqueta:'', tipo:'text', opciones:[]} : clone(getCampo(id));
   if(!cp.opciones) cp.opciones = [];
   const inEtq = el('input', {value:cp.etiqueta, placeholder:'Tipo de canalización'});
-  const inTipo = el('select', null, ...PRIMITIVOS.map(p => el('option', {value:p.id, ...(p.id === cp.tipo ? {selected:'selected'} : {})}, p.nombre)));
+  const tipoFijo = CAMPOS_PK.includes(cp.id);
+  const inTipo = el('select', tipoFijo ? {disabled:'disabled'} : null, ...PRIMITIVOS.map(p => el('option', {value:p.id, ...(p.id === cp.tipo ? {selected:'selected'} : {})}, p.nombre)));
   const inOpc = el('textarea', {rows:5, placeholder:'Una opción por línea'}, cp.opciones.join('\n'));
   const opcWrap = el('div', {class:'field', style:cp.tipo === 'select' ? '' : 'display:none'}, el('span', {class:'flab'}, 'Opciones de la lista'), inOpc);
   const inLugT = el('select', null, el('option', {value:''}, 'Cualquier tipo'),
@@ -7328,12 +7336,13 @@ function editarCampo(id, tipoParaAnadir){
   openModal(esNuevo ? 'Nuevo campo' : 'Editar campo',
     el('div', null,
       el('div', {class:'field'}, el('span', {class:'flab'}, 'Etiqueta'), inEtq),
-      el('div', {class:'field'}, el('span', {class:'flab'}, 'Tipo de campo'), inTipo),
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Tipo de campo'), inTipo,
+        tipoFijo ? el('p', {class:'hint'}, 'Fijo: el esquema, el plano y los lugares sitúan cada elemento por su campo de tipo PK. Admite 21+000, 21,000 o 21000.') : null),
       opcWrap, lugWrap
     ),
     () => {
       cp.etiqueta = inEtq.value.trim();
-      cp.tipo = inTipo.value;
+      cp.tipo = tipoFijo ? 'pk' : inTipo.value;
       cp.opciones = inTipo.value === 'select' ? inOpc.value.split('\n').map(s => s.trim()).filter(Boolean) : [];
       if(cp.tipo === 'lugar' && inLugT.value) cp.lugarTipo = inLugT.value; else delete cp.lugarTipo;
       if(!cp.etiqueta){ alert('Pon una etiqueta.'); return false; }
