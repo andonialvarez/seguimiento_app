@@ -722,6 +722,20 @@ function pkNum(s){
   return f;
 }
 function toPkStr(km){ const neg = km < 0, t = Math.round(Math.abs(km) * 1000); return (neg ? '-' : '') + Math.floor(t / 1000) + ',' + String(t % 1000).padStart(3, '0'); }
+/* PK con «+» (45+320), que es como se escribe en obra y como se guarda. */
+function toPkMas(km){ const neg = km < 0, t = Math.round(Math.abs(km) * 1000); return (neg ? '-' : '') + Math.floor(t / 1000) + '+' + String(t % 1000).padStart(3, '0'); }
+/* Casilla de PK. En el móvil saca el teclado numérico (inputmode decimal), que no trae «+»:
+   se escribe 45,320 o 45.320 (o 45320) y al salir de la casilla queda 45+320. Lo que no se
+   entiende como PK se deja tal cual. Se avisa con «input» para que quien guarde al teclear
+   se quede con el valor ya convertido. */
+function inPK(props){
+  const n = el('input', Object.assign({inputmode:'decimal', autocomplete:'off'}, props));
+  n.addEventListener('change', () => {
+    const v = n.value.trim(), k = pkNum(v); if(!v || !isFinite(k)) return;
+    const s = toPkMas(k); if(s !== n.value){ n.value = s; n.dispatchEvent(new Event('input', {bubbles:true})); }
+  });
+  return n;
+}
 function fmtKm(v){ return isNaN(v) ? '—' : v.toFixed(3).replace('.', ',') + ' km'; }
 function elemPK(e){
   const t = getTipo(e.tipoId); if(!t) return {ini:NaN, fin:NaN, pu:NaN};
@@ -1468,7 +1482,7 @@ function dzTabla(titulo, key, cols){
       let inp;
       if(col.o) inp = el('select', null, el('option', {value:''}, '—'),
         ...col.o.map(o => el('option', {value:o, ...(String(row[col.k] || '') === o ? {selected:'selected'} : {})}, o)));
-      else inp = el('input', {value:row[col.k] || '', placeholder:col.ph || ''});
+      else inp = (/^pk/i.test(col.k) ? inPK : (o => el('input', o)))({value:row[col.k] || '', placeholder:col.ph || ''});
       inp.addEventListener(col.o ? 'change' : 'input', e => { row[col.k] = e.target.value; save(); });
       tr.appendChild(el('td', null, inp));
     });
@@ -4238,9 +4252,9 @@ function dzEditarGenerado(gid){
   const lineal = !!(g.pkIni || g.pkFin);
   const inCod = el('input', {value:g.codigo || ''});
   const inTipo = el('input', {value:g.tipo || ''});
-  const inPk = el('input', {value:g.pk || '', placeholder:'5+020'});
-  const inIni = el('input', {value:g.pkIni || '', placeholder:'5+000'});
-  const inFin = el('input', {value:g.pkFin || '', placeholder:'5+150'});
+  const inPk = inPK({value:g.pk || '', placeholder:'5+020'});
+  const inIni = inPK({value:g.pkIni || '', placeholder:'5+000'});
+  const inFin = inPK({value:g.pkFin || '', placeholder:'5+150'});
   const inVia = el('input', {value:g.via || ''});
   const estNom = (disenoDe().estaciones || []).map(x => String(x.nombre || '').trim()).filter(Boolean);
   const selEst = el('select', null, el('option', {value:''}, '— (trayecto)'),
@@ -4786,7 +4800,7 @@ function repFormulario(rep){
   const iObj = el('select', null, ...objs.map(o => el('option', {value:o, ...(o === r.objetivo ? {selected:'selected'} : {})}, o)));
   const iAmb = el('select', null, ...[['linea', 'Toda la línea'], ['estacion', 'Un lugar (estación, enclavamiento…)'], ['pk', 'Tramo de PK']].map(([v, t]) => el('option', {value:v, ...(v === a.tipo ? {selected:'selected'} : {})}, t)));
   const iLug = el('select', null, ...(lug.length ? lug.map(l => el('option', {value:l.id, ...(l.id === a.lugarId ? {selected:'selected'} : {})}, lugarTxt(l))) : [el('option', {value:''}, 'No hay lugares: créalos en Esquema → Lugares')]));
-  const iPi = el('input', {type:'text', placeholder:'p. ej. 11,000', value:a.pkIni || ''}), iPf = el('input', {type:'text', placeholder:'p. ej. 11,500', value:a.pkFin || ''});
+  const iPi = inPK({placeholder:'p. ej. 11+000', value:a.pkIni || ''}), iPf = inPK({placeholder:'p. ej. 11+500', value:a.pkFin || ''});
   const fila = (lab, inp) => el('label', {style:'display:block;margin-bottom:10px'}, el('div', {class:'lab', style:'margin-bottom:4px'}, lab), inp);
   const bLug = fila('Lugar', iLug), bPk = el('div', {style:'display:flex;gap:10px'}, fila('PK desde', iPi), fila('PK hasta', iPf));
   const vis = () => { bLug.style.display = iAmb.value === 'estacion' ? '' : 'none'; bPk.style.display = iAmb.value === 'pk' ? 'flex' : 'none'; };
@@ -5609,9 +5623,9 @@ function nuevaViaModal(existing, pk1, pk2){
     valCon = pk1 != null ? pk1 : null;
     valLong = (pk1 != null && pk2 != null) ? String(Math.round((pk2 - pk1) * 1000)) : '';
   }
-  const inA = el('input', {value:valA != null ? toPkStr(valA) : '', placeholder:'19+050'});
-  const inB = el('input', {value:valB != null ? toPkStr(valB) : '', placeholder:'19+300'});
-  const inCon = el('input', {value:valCon != null ? toPkStr(valCon) : '', placeholder:'19+050'});
+  const inA = inPK({value:valA != null ? toPkMas(valA) : '', placeholder:'19+050'});
+  const inB = inPK({value:valB != null ? toPkMas(valB) : '', placeholder:'19+300'});
+  const inCon = inPK({value:valCon != null ? toPkMas(valCon) : '', placeholder:'19+050'});
   const inLong = el('input', {value:valLong, placeholder:'+200 ó -200'});
   const esTop = tipoInicial === 'topera';
   const grpSec = el('div', {class:'cols2', style:esTop ? 'display:none' : ''},
@@ -5713,8 +5727,8 @@ function nuevoLugarModal(existing, tipoIni){
     if(n && !tiposLugar().includes(n)){ state.tiposLugar = tiposLugar().concat(n); inTipo.insertBefore(el('option', {value:n}, n), inTipo.lastChild); }
     inTipo.value = n || tipo0;
   });
-  const inA = el('input', {value:existing ? toPkStr(existing.pkIni) : '', placeholder:'8+900'});
-  const inB = el('input', {value:existing ? toPkStr(existing.pkFin) : '', placeholder:'9+900'});
+  const inA = inPK({value:existing ? toPkMas(existing.pkIni) : '', placeholder:'8+900'});
+  const inB = inPK({value:existing ? toPkMas(existing.pkFin) : '', placeholder:'9+900'});
   openModal(existing ? 'Editar lugar' : 'Nuevo lugar',
     el('div', null,
       el('div', {class:'cols2'},
@@ -5785,7 +5799,7 @@ function nuevoAndenModal(existing){
   function pinta(){
     ptsWrap.innerHTML = '';
     pts.forEach((p, i) => {
-      const inPk = el('input', {value:p.pk, placeholder:'8+900', oninput:e => p.pk = e.target.value});
+      const inPk = inPK({value:p.pk, placeholder:'8+900', oninput:e => p.pk = e.target.value});
       const inAn = el('input', {type:'number', value:p.ancho, placeholder:'10', style:'width:80px', oninput:e => p.ancho = e.target.value});
       ptsWrap.appendChild(el('div', {style:'display:flex;gap:8px;align-items:center'},
         el('span', {style:'color:var(--tx3);font-size:12px;width:16px'}, String(i + 1)),
@@ -5975,13 +5989,16 @@ function numPalabras(ws){
 function numToken(ws){
   if(!ws.length) return null;
   const d = limpiaPal(ws[0]);
-  if(/^\d{1,4}$/.test(d)) return {n:+d, k:1};
+  if(/^\d{1,6}$/.test(d)) return {n:+d, k:1};
   return numPalabras(ws);
 }
 /* Devuelve todos los PK que aparecen en la frase, en formato «9+531». */
 function pksDeOrden(raw){
   /* separar los signos pegados: «9+531» → «9 + 531» */
-  const t = String(raw || '').replace(/(\d)\s*([+.,])\s*(\d)/g, '$1 $2 $3');
+  const t = String(raw || '')
+    /* el dictado escribe «P.K.», «p k», «pe ka», «peca» o lo pega al número («pk45+320») */
+    .replace(/(^|[^a-zñáéíóú])(?:p\s?\.?\s?k|pe\s?ka|pec[aá])\.?\s*(?=[\s\d]|$)/gi, '$1pk ')
+    .replace(/(\d)\s*([+.,])\s*(\d)/g, '$1 $2 $3');
   const ws = t.split(/\s+/).filter(Boolean);
   const out = [];
   for(let i = 0; i < ws.length; i++){
@@ -5990,7 +6007,16 @@ function pksDeOrden(raw){
       || (w === 'punto' && /^kilom[eé]trico$/.test(limpiaPal(ws[i + 1] || '')));
     if(!cab && !/^\d{1,4}$/.test(w)) continue;
     let j = cab ? i + (w === 'punto' ? 2 : 1) : i;
-    const a = numToken(ws.slice(j)); if(!a || a.n > 999) continue;
+    const a = numToken(ws.slice(j)); if(!a) continue;
+    if(a.n > 999){
+      /* el dictado junta km y metros: «PK 45320», «PK 9531», «cuarenta y cinco mil trescientos
+         veinte». Tras «PK» es km+mmm (mismo criterio que pkNum: ninguna línea llega a 1.000 km). */
+      let q = i - 1; while(q >= 0 && /^(el|la|los|las)$/.test(limpiaPal(ws[q]))) q--;
+      const rango = out.length && /^(a|al|hasta|y|e)$/.test(limpiaPal(ws[q] || ''));   /* «del pk 9300 al 9600» */
+      if(!(cab || rango) || a.n > 999999) continue;
+      out.push({pk:Math.floor(a.n / 1000) + '+' + String(a.n % 1000).padStart(3, '0'), i});
+      i = j + a.k - 1; continue;
+    }
     j += a.k;
     const s0 = limpiaPal(ws[j] || '');
     let sep = null, b = null;
@@ -6196,6 +6222,7 @@ function ordenModal(){
         el('ul', {style:'margin:4px 0 0 16px;padding:0'},
           el('li', null, '«PK 9+531», «PK 9,531», «PK 9.531»'),
           el('li', null, '«PK 9 531» — sin decir nada entre medias'),
+          el('li', null, '«PK 9531» / «PK nueve mil quinientos treinta y uno» — km y metros juntos'),
           el('li', null, '«PK 9 más 531» / «kilómetro 9 con 531»'),
           el('li', null, '«PK nueve más quinientos treinta y uno»'),
           el('li', null, 'tramo: «del PK 9+300 al 9+600»'),
@@ -8567,7 +8594,7 @@ function nuevoElemento(id, prefill, tabIni){
         el('option', {value:'No', ...(val === 'No' ? {selected:'selected'} : {})}, 'No'));
       else if(c.tipo === 'number') input = el('input', {type:'number', value:val});
       else if(c.tipo === 'date') input = el('input', {type:'date', value:val});
-      else if(c.tipo === 'pk') input = el('input', {placeholder:'45+320', value:val});
+      else if(c.tipo === 'pk') input = inPK({placeholder:'45+320', value:val});
       else if(c.tipo === 'photo'){ input = el('input', {type:'hidden', value:val}); extra = fotoWidget(input, ro); }
       else if(c.tipo === 'focos'){ input = el('input', {type:'hidden', value:val}); extra = focosWidget(input, ro); }
       else if(c.tipo === 'doc') input = el('input', {placeholder:'Nombre de archivo', value:val});
