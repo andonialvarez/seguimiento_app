@@ -5989,13 +5989,16 @@ function numPalabras(ws){
 function numToken(ws){
   if(!ws.length) return null;
   const d = limpiaPal(ws[0]);
-  if(/^\d{1,4}$/.test(d)) return {n:+d, k:1};
+  if(/^\d{1,6}$/.test(d)) return {n:+d, k:1};
   return numPalabras(ws);
 }
 /* Devuelve todos los PK que aparecen en la frase, en formato «9+531». */
 function pksDeOrden(raw){
   /* separar los signos pegados: «9+531» → «9 + 531» */
-  const t = String(raw || '').replace(/(\d)\s*([+.,])\s*(\d)/g, '$1 $2 $3');
+  const t = String(raw || '')
+    /* el dictado escribe «P.K.», «p k», «pe ka», «peca» o lo pega al número («pk45+320») */
+    .replace(/(^|[^a-zñáéíóú])(?:p\s?\.?\s?k|pe\s?ka|pec[aá])\.?\s*(?=[\s\d]|$)/gi, '$1pk ')
+    .replace(/(\d)\s*([+.,])\s*(\d)/g, '$1 $2 $3');
   const ws = t.split(/\s+/).filter(Boolean);
   const out = [];
   for(let i = 0; i < ws.length; i++){
@@ -6004,7 +6007,16 @@ function pksDeOrden(raw){
       || (w === 'punto' && /^kilom[eé]trico$/.test(limpiaPal(ws[i + 1] || '')));
     if(!cab && !/^\d{1,4}$/.test(w)) continue;
     let j = cab ? i + (w === 'punto' ? 2 : 1) : i;
-    const a = numToken(ws.slice(j)); if(!a || a.n > 999) continue;
+    const a = numToken(ws.slice(j)); if(!a) continue;
+    if(a.n > 999){
+      /* el dictado junta km y metros: «PK 45320», «PK 9531», «cuarenta y cinco mil trescientos
+         veinte». Tras «PK» es km+mmm (mismo criterio que pkNum: ninguna línea llega a 1.000 km). */
+      let q = i - 1; while(q >= 0 && /^(el|la|los|las)$/.test(limpiaPal(ws[q]))) q--;
+      const rango = out.length && /^(a|al|hasta|y|e)$/.test(limpiaPal(ws[q] || ''));   /* «del pk 9300 al 9600» */
+      if(!(cab || rango) || a.n > 999999) continue;
+      out.push({pk:Math.floor(a.n / 1000) + '+' + String(a.n % 1000).padStart(3, '0'), i});
+      i = j + a.k - 1; continue;
+    }
     j += a.k;
     const s0 = limpiaPal(ws[j] || '');
     let sep = null, b = null;
@@ -6210,6 +6222,7 @@ function ordenModal(){
         el('ul', {style:'margin:4px 0 0 16px;padding:0'},
           el('li', null, '«PK 9+531», «PK 9,531», «PK 9.531»'),
           el('li', null, '«PK 9 531» — sin decir nada entre medias'),
+          el('li', null, '«PK 9531» / «PK nueve mil quinientos treinta y uno» — km y metros juntos'),
           el('li', null, '«PK 9 más 531» / «kilómetro 9 con 531»'),
           el('li', null, '«PK nueve más quinientos treinta y uno»'),
           el('li', null, 'tramo: «del PK 9+300 al 9+600»'),
