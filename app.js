@@ -192,6 +192,8 @@ const KEY = 'via-seguimiento-v3';
 let state, ultimoSnap = null, undoStack = [], redoStack = [];
 /* campos de PK del sistema: su tipo no se puede cambiar (ver final de migrar y editarCampo) */
 const CAMPOS_PK = ['f_pk', 'f_pkini', 'f_pkfin'];
+/* segunda vía de un elemento «entre vías» (la primera es su campo Vía) */
+const CAMPO_VIA2 = 'f_via2';
 function migrar(){
   if(!state || !state.campos || !state.elementTypes) state = semilla();
   if(!state.elementos) state.elementos = [];
@@ -430,6 +432,42 @@ function migrar(){
     }
     else state.elementTypes.push({id:'t_tarj', nombre:'Tarjeta', prefijo:'TJ', color:'#2bb3a6', campos});
     state.tarjetaV1 = true;
+  }
+  /* Entrevías: un elemento «entre vías» dice ENTRE QUÉ DOS vías está. La primera es su «Vía» de
+     siempre; la segunda va en «Segunda vía (entrevías)», que solo se pide si Lado = Entrevías.
+     Se ofrece en todo tipo que tenga «Lado / ubicación». */
+  const cLado = state.campos.find(c => c.id === 'f_lado');
+  if(cLado && cLado.tipo === 'select' && !(cLado.opciones || []).some(o => /^entrev[ií]as?$/i.test(o)))
+    (cLado.opciones = cLado.opciones || []).push('Entrevías');
+  const cVia = state.campos.find(c => c.id === 'f_via');
+  let cVia2 = state.campos.find(c => c.id === CAMPO_VIA2);
+  if(!cVia2){ cVia2 = {id:CAMPO_VIA2, etiqueta:'Segunda vía (entrevías)', tipo:'text'}; state.campos.push(cVia2); }
+  /* misma forma que «Vía»: si allí es un desplegable con 1…7, aquí también (y con las mismas opciones) */
+  if(cVia && cVia.tipo === 'select'){
+    cVia2.tipo = 'select';
+    cVia2.opciones = cVia2.opciones || [];
+    (cVia.opciones || []).forEach(o => { if(!cVia2.opciones.includes(o)) cVia2.opciones.push(o); });
+  }
+  if(!state.entreViasV1){
+    const opEntre = ((cLado && cLado.opciones) || []).find(o => /^entrev[ií]as?$/i.test(o)) || 'Entrevías';
+    state.elementTypes.forEach(t => {
+      const iLado = t.campos.findIndex(r => r.campoId === 'f_lado');
+      if(iLado < 0 || t.campos.some(r => r.campoId === CAMPO_VIA2)) return;
+      t.campos.splice(iLado + 1, 0, {campoId:CAMPO_VIA2, obligatorio:true, regla:{juntar:'Y', conds:[{campoId:'f_lado', op:'es', valor:opEntre}]}});
+    });
+    state.entreViasV1 = true;
+  }
+  /* Fecha en todos los tipos con «Estado de montaje»: la hoja de cada tipo del Excel trae su
+     columna «Fecha de instalación» para rellenarla allí (antes solo Señal, Aguja y Tarjeta). */
+  if(!state.fechaInstV1){
+    if(!state.campos.some(c => c.id === 'f_finst')) state.campos.push({id:'f_finst', etiqueta:'Fecha de instalación', tipo:'date'});
+    state.elementTypes.forEach(t => {
+      if(t.campos.some(r => r.campoId === 'f_finst')) return;
+      const iEst = t.campos.findIndex(r => r.campoId === 'f_estado');
+      if(iEst < 0) return;
+      t.campos.splice(iEst + 1, 0, {campoId:'f_finst', obligatorio:false});
+    });
+    state.fechaInstV1 = true;
   }
   /* PK, PK inicio y PK fin son de tipo «PK» siempre: el esquema, el plano, los replanteos y los
      lugares localizan el PK de un elemento por el TIPO del campo. Si se cambiaban a Texto o Número
@@ -759,11 +797,23 @@ function elemPK(e){
 }
 /* ¿este campo es «la vía» del elemento? «Vías que atraviesa» (cruce bajo vía) NO lo es:
    lleva una lista («1,3,5») y colgaría el elemento de una vía inventada. */
-function esCampoVia(c){ return !!c && c.id !== 'f_cruce_vias' && /v[ií]a/i.test(c.etiqueta || '') && !/atraviesa|cruza/i.test(c.etiqueta || ''); }
+function esCampoVia(c){ return !!c && c.id !== 'f_cruce_vias' && c.id !== CAMPO_VIA2 && /v[ií]a/i.test(c.etiqueta || '') && !/atraviesa|cruza/i.test(c.etiqueta || ''); }
 function viaDe(e){
   const t = getTipo(e.tipoId); if(!t) return '';
   const r = t.campos.find(rr => esCampoVia(getCampo(rr.campoId)));
   return r ? (e.valores[r.campoId] || '') : '';
+}
+/* ¿está «entre vías»? (Lado / ubicación = Entrevías) */
+function esEntrevias(e){
+  const t = getTipo(e.tipoId); if(!t || !t.campos.some(r => r.campoId === 'f_lado')) return false;
+  return /^\s*entre\s*v[ií]as?\s*$/i.test(String((e.valores || {}).f_lado || ''));
+}
+/* la otra vía de un elemento entre vías, o '' si no lo es o no la tiene */
+function via2De(e){
+  if(!esEntrevias(e)) return '';
+  const t = getTipo(e.tipoId); if(!t || !t.campos.some(r => r.campoId === CAMPO_VIA2)) return '';
+  const v = String((e.valores || {})[CAMPO_VIA2] || '').trim();
+  return v && v !== String(viaDe(e) || '').trim() ? v : '';
 }
 /* posición vertical respecto a la vía por el campo Lado/ubicación:
    -1 = arriba (lado izquierdo), 1 = abajo (lado derecho), 0 = sin definir.
@@ -4617,14 +4667,60 @@ function viewHistorial(){
 let certTab = 'cert', instDesde = '', instHasta = '';   /* fechas 'AAAA-MM-DD' */
 const estaInstalado = v => /instal|verific/i.test(v || '');
 const isoDia = ms => { const d = new Date(ms); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
-/* «Fecha de instalación» tal como venga: 2026-09-15, 15/09/2026 o 15-09-26 */
+/* Fecha escrita de cualquier forma → 'AAAA-MM-DD' (o '' si no se entiende). Admite:
+   2026-09-15 · 2026/9/15 · 20260915 · 15/09/2026 · 15-9-26 · 15.09.2026 · 15 09 2026 ·
+   «15 de septiembre de 2026» · «martes, 15 de sept. de 2026» · 15-sep-26 · Sep 15, 2026 ·
+   September 15th 2026 · con hora detrás (15/09/2026 10:30) · fecha de Excel (Date o nº de serie
+   45915) · ISO con hora y zona. Día y mes en número se leen a la española (día/mes); solo si el
+   segundo pasa de 12 se entiende mes/día (formato de EE. UU.). Años de dos cifras: 00-69 → 20xx. */
+const MESES_FECHA = [
+  ['ene', 'jan', 'gen', 'xan', 'urt'], ['feb', 'fev', 'ots'], ['mar', 'mart'], ['abr', 'apr', 'avr', 'abri'], ['may', 'mai', 'mayo', 'mag'], ['jun', 'xuñ', 'xun', 'giu', 'juin'],
+  ['jul', 'xul', 'lug', 'juil'], ['ago', 'aug', 'ag', 'agos', 'aou'], ['sep', 'set', 'sept'], ['oct', 'out', 'okt', 'ott'], ['nov'], ['dic', 'dec', 'dez', 'des']];
+function mesDeTexto(w){
+  w = String(w || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\.$/, '');
+  if(w.length < 3) return 0;
+  for(let i = 0; i < 12; i++) if(MESES_FECHA[i].some(p => w.startsWith(p) || (w.length >= 3 && p.startsWith(w)))) return i + 1;
+  return 0;
+}
+function fechaISO(v){
+  if(v == null || v === '') return '';
+  const iso = (y, m, d) => {
+    if(y < 100) y += y < 70 ? 2000 : 1900;
+    if(!(m >= 1 && m <= 12 && d >= 1 && y >= 1900 && y <= 2200)) return '';
+    if(d > new Date(y, m, 0).getDate()) return '';
+    return y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+  };
+  /* nº de serie de Excel: días desde el 30-12-1899 (20000 ≈ 1954, 80000 ≈ 2119) */
+  const serie = n => { const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(n) * 86400000); return iso(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate()); };
+  if(v instanceof Date) return isNaN(v.getTime()) ? '' : iso(v.getUTCFullYear(), v.getUTCMonth() + 1, v.getUTCDate());
+  if(typeof v === 'number') return v >= 20000 && v <= 80000 ? serie(v) : '';
+  let s = String(v).trim().toLowerCase();
+  if(!s) return '';
+  let m;
+  if((m = s.match(/^(\d{4})-(\d{2})-(\d{2})t\d/))) return iso(+m[1], +m[2], +m[3]);   /* ISO con hora */
+  if(/^\d{5}(\.\d+)?$/.test(s)){ const n = +s; return n >= 20000 && n <= 80000 ? serie(n) : ''; }
+  if((m = s.match(/^(\d{4})(\d{2})(\d{2})$/))) return iso(+m[1], +m[2], +m[3]);
+  /* la hora del final no cuenta */
+  s = s.replace(/[\s,]+\d{1,2}[:h.]\d{2}([:.]\d{2})?(\s*(h|hrs?|horas?|a\.?\s?m\.?|p\.?\s?m\.?))?\s*$/, '').trim();
+  /* el día de la semana del principio tampoco */
+  s = s.replace(/^(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|lun|mar|mi[eé]|jue|vie|s[aá]b|dom|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\.?,?\s+/, '');
+  if((m = s.match(/^(\d{4})\s*[-\/.\s]\s*(\d{1,2})\s*[-\/.\s]\s*(\d{1,2})$/))) return iso(+m[1], +m[2], +m[3]);
+  if((m = s.match(/^(\d{1,2})\s*[-\/.\s]\s*(\d{1,2})\s*[-\/.\s]\s*(\d{2}|\d{4})$/))){
+    const a = +m[1], b = +m[2], y = +m[3];
+    return (b > 12 && a <= 12) ? iso(y, a, b) : iso(y, b, a);
+  }
+  /* con el mes en letra */
+  const t = s.replace(/(\d)(º|ª|st|nd|rd|th)\b/g, '$1').replace(/\bdel?\b/g, ' ').replace(/[,\/\-.]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if((m = t.match(/^(\d{1,2}) ([a-zà-ÿñ]+) (\d{2}|\d{4})$/))){ const mm = mesDeTexto(m[2]); return mm ? iso(+m[3], mm, +m[1]) : ''; }
+  if((m = t.match(/^([a-zà-ÿñ]+) (\d{1,2}) (\d{2}|\d{4})$/))){ const mm = mesDeTexto(m[1]); return mm ? iso(+m[3], mm, +m[2]) : ''; }
+  if((m = t.match(/^(\d{4}) ([a-zà-ÿñ]+) (\d{1,2})$/))){ const mm = mesDeTexto(m[2]); return mm ? iso(+m[1], mm, +m[3]) : ''; }
+  return '';
+}
+/* «Fecha de instalación» tal como venga (ver fechaISO) → ms a mediodía, o NaN */
 function fechaCampo(s){
-  s = String(s || '').trim(); if(!s) return NaN;
-  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if(m) return new Date(+m[1], +m[2] - 1, +m[3], 12).getTime();
-  m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/);
-  if(m){ const y = +m[3] < 100 ? 2000 + +m[3] : +m[3]; return new Date(y, +m[2] - 1, +m[1], 12).getTime(); }
-  return NaN;
+  const f = fechaISO(s); if(!f) return NaN;
+  const [y, m, d] = f.split('-').map(Number);
+  return new Date(y, m - 1, d, 12).getTime();
 }
 /* cuándo quedó instalado un elemento (ms), o null si hoy no lo está.
    1º la «Fecha de instalación» si está rellena; si no, el último paso de su «Estado de montaje» a
@@ -6668,6 +6764,9 @@ function esquemaCanvas(conPk, sinPk, elsAll){
   /* el ancho/extensión del esquema y los carriles NO dependen de los filtros de elementos
      (pero sí del lugar elegido: mirando CATOIRA no debe aparecer el carril de una vía de PADRÓN) */
   let paraExtent = (elsAll && elsAll.length) ? elsAll.map(e => ({p:elemPK(e), via:viaDe(e)})) : conPk.concat(sinPk);
+  /* un elemento entre vías también «usa» su segunda vía: necesita su carril aunque nada más esté en ella */
+  const conVia2 = arr => arr.concat(arr.filter(d => d.e && via2De(d.e)).map(d => ({e:d.e, p:d.p, via:via2De(d.e)})));
+  if(elsAll && elsAll.length) paraExtent = paraExtent.concat(elsAll.filter(e => via2De(e)).map(e => ({p:elemPK(e), via:via2De(e)})));
   if(lugarSel) paraExtent = paraExtent.filter(d => [d.p.ini, d.p.fin, d.p.pu]
     .some(v => !isNaN(v) && v >= lugarSel.pkIni - 0.2 && v <= lugarSel.pkFin + 0.2));
   let mn, mx;
@@ -6776,7 +6875,7 @@ function esquemaCanvas(conPk, sinPk, elsAll){
   const viasDefNums = new Set(viasDef.map(v => String(v.num)));
   viasDef.forEach(v => { peine(String(v.num), v.pkIni, v.pkFin, esMain(v.padre) ? baseY : yFor(v.padre), v.tipo === 'topera', v.ladoCon || 'ini'); });
   /* auto: zonas de estación para vías referenciadas por elementos y no dibujadas */
-  const secEls = vis.filter(d => !esMain(d.via) && !viasDefNums.has(String(d.via).trim()));
+  const secEls = conVia2(vis).filter(d => !esMain(d.via) && !viasDefNums.has(String(d.via).trim()));
   const secPks = [];
   secEls.forEach(d => [d.p.ini, d.p.fin, d.p.pu].forEach(k => { if(!isNaN(k)) secPks.push(k); }));
   secPks.sort((a, b) => a - b);
@@ -6864,69 +6963,97 @@ function esquemaCanvas(conPk, sinPk, elsAll){
       '<text x="' + x.toFixed(1) + '" y="' + (yTop - 4) + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' + lab + '</text></g>';
   });
 
-  /* --- LINEALES: canalización = banda que contiene su cableado; resto apilado arriba/abajo --- */
+  /* --- LINEALES: canalización = banda que contiene su cableado; resto apilado arriba/abajo ---
+     Entre vías: centrados entre las dos vías. Continuidad: dos tramos del mismo tipo, misma vía y
+     mismo lado que se tocan (el PK fin de uno es el PK inicio del otro, ±1 m) van en la misma fila y
+     sin cota en la junta, como una sola pieza. */
   const linAll = vis.filter(d => !cruceIds.has(d.e.id) && esLineal(d));
   const tId = d => (getTipo(d.e.tipoId) || {}).id;
   const viaDe0 = d => esMain(d.via) ? '1' : String(d.via).trim();
+  /* par de vías de un elemento entre vías, ordenado («1|3»), o '' */
+  const parDe = d => { const v2 = via2De(d.e); if(!v2) return ''; const v1 = viaDe0(d), w2 = esMain(v2) ? '1' : v2;
+    return [v1, w2].sort(numSort).join('|'); };
   const rango = d => [Math.min(d.p.ini, d.p.fin), Math.max(d.p.ini, d.p.fin)];
   const cablesLibres = new Set(linAll.filter(d => tId(d) === 't_cable').map(d => d.e.id));
   const bandas = [];
   linAll.filter(d => tId(d) === 't_canal').forEach(cd => {
-    const v = viaDe0(cd), dr = (ladoVert(cd.e) < 0 ? -1 : (ladoVert(cd.e) > 0 ? 1 : -1)), rg = rango(cd);
+    const v = viaDe0(cd), par = parDe(cd), dr = par ? 1 : (ladoVert(cd.e) < 0 ? -1 : (ladoVert(cd.e) > 0 ? 1 : -1)), rg = rango(cd);
     const hijos = linAll.filter(xd => {
-      if(tId(xd) !== 't_cable' || !cablesLibres.has(xd.e.id) || viaDe0(xd) !== v) return false;
-      const xd2 = ladoVert(xd.e); if(xd2 !== 0 && (xd2 < 0 ? -1 : 1) !== dr) return false;
+      if(tId(xd) !== 't_cable' || !cablesLibres.has(xd.e.id) || viaDe0(xd) !== v || parDe(xd) !== par) return false;
+      const xd2 = ladoVert(xd.e); if(!par && xd2 !== 0 && (xd2 < 0 ? -1 : 1) !== dr) return false;
       const xr = rango(xd); return xr[1] > rg[0] && xr[0] < rg[1];
     });
     hijos.forEach(xd => cablesLibres.delete(xd.e.id));
-    bandas.push({d:cd, v, dr, hijos});
+    bandas.push({d:cd, v, par, dr, hijos});
   });
   const grpL = {};
-  const addG = (v, item) => { (grpL[v] = grpL[v] || []).push(item); };
-  bandas.forEach(bd => addG(bd.v, {banda:bd, e:bd.d.e, p:bd.d.p, via:bd.d.via}));
+  const addG = (k, item) => { (grpL[k] = grpL[k] || []).push(item); };
+  bandas.forEach(bd => addG(bd.par || bd.v, {banda:bd, e:bd.d.e, p:bd.d.p, via:bd.d.via}));
   linAll.forEach(d => {
     if(tId(d) === 't_canal') return;
     if(tId(d) === 't_cable' && !cablesLibres.has(d.e.id)) return;
-    addG(viaDe0(d), d);
+    addG(parDe(d) || viaDe0(d), d);
   });
-  Object.keys(grpL).forEach(v => {
-    const arr = grpL[v].sort((p, q) => Math.min(p.p.ini, p.p.fin) - Math.min(q.p.ini, q.p.fin));
-    const y0 = yFor(v);
-    const rows = {'-1':[], '1':[]};
+  /* km: hasta 1 m de hueco cuenta como junta (en obra el siguiente tramo se apunta al metro siguiente: 3+247 → 3+248) */
+  const TOL_JUNTA = 0.001 + 1e-9;
+  Object.keys(grpL).forEach(k => {
+    const entre = k.indexOf('|') >= 0;
+    const y0 = entre ? (k.split('|').map(v => yFor(v)).reduce((a, b) => a + b, 0) / 2) : yFor(k);
+    const v = entre ? k.split('|')[0] : k;
+    const arr = grpL[k].sort((p, q) => rango(p)[0] - rango(q)[0] || rango(p)[1] - rango(q)[1]);
+    const dirDe = d => entre ? 1 : (d.banda ? d.banda.dr : (ladoVert(d.e) < 0 ? -1 : 1));
+    const hDe = d => d.banda ? Math.max(9, d.banda.hijos.length * 5 + 6) : 6;
+    /* cadenas de tramos continuos */
+    const cadenas = [];
     arr.forEach(d => {
-      const rg = [Math.min(d.p.ini, d.p.fin), Math.max(d.p.ini, d.p.fin)];
-      const a = X(rg[0]), b = X(rg[1]);
-      const bd = d.banda;
-      const dir = bd ? bd.dr : (ladoVert(d.e) < 0 ? -1 : 1);
-      const h = bd ? Math.max(9, bd.hijos.length * 5 + 6) : 6;
+      const rg = rango(d), clave = tId(d) + '|' + dirDe(d) + '|' + (d.banda ? 'B' : 'L') + '|' + String((d.e.valores || {}).f_lado || '').trim().toLowerCase();
+      const ca = cadenas.find(c => c.clave === clave && Math.abs(c.fin - rg[0]) <= TOL_JUNTA);
+      if(ca){ ca.items.push(d); ca.fin = Math.max(ca.fin, rg[1]); ca.h = Math.max(ca.h, hDe(d)); }
+      else cadenas.push({clave, ini:rg[0], fin:rg[1], h:hDe(d), dir:dirDe(d), items:[d]});
+    });
+    const rows = {'-1':[], '1':[]};
+    cadenas.forEach(ca => {
+      const a = X(ca.ini), b = X(ca.fin), h = ca.h, dir = ca.dir;
       const st = rows[dir < 0 ? '-1' : '1'];
       let slot = st.find(sl => sl.end < a - 4);
       if(!slot){ slot = {end:0, off:st.reduce((m, sl) => Math.max(m, sl.off + sl.h), 0)}; st.push(slot); }
       slot.end = b; slot.h = Math.max(slot.h || 0, h);
-      const an = andenEn(v, dir, (rg[0] + rg[1]) / 2);
-      const top = an ? (an.yInner + dir * (5 + slot.off)) : (dir < 0 ? (y0 - 13 - slot.off - h) : (y0 + 12 + slot.off));
-      const t = getTipo(d.e.tipoId) || {}, col = t.color || '#888';
-      if(bd){
-        s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
-          '<rect x="' + a.toFixed(1) + '" y="' + top.toFixed(1) + '" width="' + (b - a).toFixed(1) + '" height="' + h.toFixed(1) + '" rx="3" fill="' + col + '1e" stroke="' + col + '" stroke-width="1.4"/>';
-        bd.hijos.forEach((xd, i) => {
-          const hr = [Math.min(xd.p.ini, xd.p.fin), Math.max(xd.p.ini, xd.p.fin)];
-          const hx1 = Math.max(a, X(hr[0])), hx2 = Math.min(b, X(hr[1]));
-          const cy = top + (i + 1) * (h / (bd.hijos.length + 1));
-          const cc = (getTipo(xd.e.tipoId) || {}).color || '#4d9de0';
-          s += '<line x1="' + hx1.toFixed(1) + '" y1="' + cy.toFixed(1) + '" x2="' + hx2.toFixed(1) + '" y2="' + cy.toFixed(1) + '" stroke="' + cc + '" stroke-width="2" stroke-linecap="round"><title>' + esc((xd.e.codigo || 'cable') + ' · dentro de ' + (d.e.codigo || 'canalización')) + '</title></line>';
-        });
-        s += '<text x="' + ((a + b) / 2).toFixed(1) + '" y="' + (dir < 0 ? (top - 3) : (top + h + 9)).toFixed(1) + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' +
-          esc((d.e.codigo || '') + (bd.hijos.length ? ' · ' + bd.hijos.length + ' cable' + (bd.hijos.length > 1 ? 's' : '') : '')) + '</text></g>';
-      } else {
-        const y = dir < 0 ? (top + h) : top;
-        const ty = dir < 0 ? (y - 5) : (y + 12);
-        s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
-          '<line x1="' + a.toFixed(1) + '" y1="' + y.toFixed(1) + '" x2="' + b.toFixed(1) + '" y2="' + y.toFixed(1) + '" stroke="' + col + '" stroke-width="3" stroke-linecap="round"/>' +
-          '<line x1="' + a.toFixed(1) + '" y1="' + (y - 4).toFixed(1) + '" x2="' + a.toFixed(1) + '" y2="' + (y + 4).toFixed(1) + '" stroke="' + col + '" stroke-width="1.5"/>' +
-          '<line x1="' + b.toFixed(1) + '" y1="' + (y - 4).toFixed(1) + '" x2="' + b.toFixed(1) + '" y2="' + (y + 4).toFixed(1) + '" stroke="' + col + '" stroke-width="1.5"/>' +
-          '<text x="' + ((a + b) / 2).toFixed(1) + '" y="' + ty.toFixed(1) + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' + esc(d.e.codigo || '') + '</text></g>';
-      }
+      const an = entre ? null : andenEn(v, dir, (ca.ini + ca.fin) / 2);
+      const top = entre ? (y0 - h / 2 - 4 + slot.off) : an ? (an.yInner + dir * (5 + slot.off)) : (dir < 0 ? (y0 - 13 - slot.off - h) : (y0 + 12 + slot.off));
+      ca.items.forEach(d => {
+        const rg = rango(d), xa = X(rg[0]), xb = X(rg[1]);
+        /* ¿hay otro tramo de la cadena pegado a este extremo? entonces no lleva cota */
+        const pegIni = ca.items.some(o => o !== d && Math.abs(rango(o)[1] - rg[0]) <= TOL_JUNTA);
+        const pegFin = ca.items.some(o => o !== d && Math.abs(rango(o)[0] - rg[1]) <= TOL_JUNTA);
+        const t = getTipo(d.e.tipoId) || {}, col = t.color || '#888';
+        const bd = d.banda;
+        const etq = (d.e.codigo || '') + (bd && bd.hijos.length ? ' · ' + bd.hijos.length + ' cable' + (bd.hijos.length > 1 ? 's' : '') : '');
+        if(bd){
+          const yT = top, yB = top + h, f = n => n.toFixed(1);
+          s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
+            '<rect x="' + f(xa) + '" y="' + f(yT) + '" width="' + f(xb - xa) + '" height="' + f(h) + '" fill="' + col + '1e" stroke="none"/>' +
+            '<path d="M' + f(xa) + ' ' + f(yT) + ' L' + f(xb) + ' ' + f(yT) + ' M' + f(xa) + ' ' + f(yB) + ' L' + f(xb) + ' ' + f(yB) +
+              (pegIni ? '' : ' M' + f(xa) + ' ' + f(yT) + ' L' + f(xa) + ' ' + f(yB)) +
+              (pegFin ? '' : ' M' + f(xb) + ' ' + f(yT) + ' L' + f(xb) + ' ' + f(yB)) +
+              '" fill="none" stroke="' + col + '" stroke-width="1.4"/>';
+          bd.hijos.forEach((xd, i) => {
+            const hr = rango(xd);
+            const hx1 = Math.max(xa, X(hr[0])), hx2 = Math.min(xb, X(hr[1]));
+            const cy = top + (i + 1) * (h / (bd.hijos.length + 1));
+            const cc = (getTipo(xd.e.tipoId) || {}).color || '#4d9de0';
+            s += '<line x1="' + hx1.toFixed(1) + '" y1="' + cy.toFixed(1) + '" x2="' + hx2.toFixed(1) + '" y2="' + cy.toFixed(1) + '" stroke="' + cc + '" stroke-width="2" stroke-linecap="round"><title>' + esc((xd.e.codigo || 'cable') + ' · dentro de ' + (d.e.codigo || 'canalización')) + '</title></line>';
+          });
+          s += '<text x="' + ((xa + xb) / 2).toFixed(1) + '" y="' + (dir < 0 ? (top - 3) : (top + h + 9)).toFixed(1) + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' + esc(etq) + '</text></g>';
+        } else {
+          const y = entre ? (top + h / 2) : (dir < 0 ? (top + h) : top);
+          const ty = (!entre && dir < 0) ? (y - 5) : (y + 12);
+          s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
+            '<line x1="' + xa.toFixed(1) + '" y1="' + y.toFixed(1) + '" x2="' + xb.toFixed(1) + '" y2="' + y.toFixed(1) + '" stroke="' + col + '" stroke-width="3" stroke-linecap="' + (pegIni || pegFin ? 'butt' : 'round') + '"/>' +
+            (pegIni ? '' : '<line x1="' + xa.toFixed(1) + '" y1="' + (y - 4).toFixed(1) + '" x2="' + xa.toFixed(1) + '" y2="' + (y + 4).toFixed(1) + '" stroke="' + col + '" stroke-width="1.5"/>') +
+            (pegFin ? '' : '<line x1="' + xb.toFixed(1) + '" y1="' + (y - 4).toFixed(1) + '" x2="' + xb.toFixed(1) + '" y2="' + (y + 4).toFixed(1) + '" stroke="' + col + '" stroke-width="1.5"/>') +
+            '<text x="' + ((xa + xb) / 2).toFixed(1) + '" y="' + ty.toFixed(1) + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' + esc(etq) + '</text></g>';
+        }
+      });
     });
   });
 
@@ -6935,14 +7062,16 @@ function esquemaCanvas(conPk, sinPk, elsAll){
   vis.filter(d => !cruceIds.has(d.e.id) && !esLineal(d)).forEach(d => {
     const t = getTipo(d.e.tipoId) || {}, col = t.color || '#888';
     const v0 = esMain(d.via) ? '1' : String(d.via).trim();
-    const y0 = yFor(d.via), x = X(d.p.pu), dir = ladoVert(d.e);
+    const v2 = via2De(d.e);
+    /* entre vías: a media distancia entre las dos */
+    const y0 = v2 ? (yFor(d.via) + yFor(v2)) / 2 : yFor(d.via), x = X(d.p.pu), dir = v2 ? 0 : ladoVert(d.e);
     const esAg = /aguja|desv/i.test(t.nombre || '');
-    const an = esAg ? null : andenEn(v0, dir, d.p.pu);
+    const an = (esAg || v2) ? null : andenEn(v0, dir, d.p.pu);
     const key = dir + '_' + Math.round(y0) + '_' + Math.round(x / 15);
     const k = occ[key] = (occ[key] || 0) + 1;
     const stack = (k === 1 ? 0 : (k % 2 ? -1 : 1) * Math.ceil((k - 1) / 2) * 12);
     const cy = an ? (an.yInner + an.dir * (14 + Math.abs(stack)))
-                  : (dir > 0 ? (y0 + 13 + stack) : (dir < 0 ? (y0 - 13 + stack) : (y0 - 11 + stack)));
+                  : (v2 ? (y0 + stack) : dir > 0 ? (y0 + 13 + stack) : (dir < 0 ? (y0 - 13 + stack) : (y0 - 11 + stack)));
     const ty = ((an ? an.dir : dir) > 0) ? (cy + 15) : (cy - 9);
     s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
       (esAg ? tri(x, cy + 6) : '<circle cx="' + x.toFixed(1) + '" cy="' + cy + '" r="5" fill="' + col + '" stroke="#0a0f16" stroke-width="1.5"/>') +
@@ -8602,7 +8731,7 @@ function nuevoElemento(id, prefill, tabIni){
         el('option', {value:'Sí', ...(val === 'Sí' ? {selected:'selected'} : {})}, 'Sí'),
         el('option', {value:'No', ...(val === 'No' ? {selected:'selected'} : {})}, 'No'));
       else if(c.tipo === 'number') input = el('input', {type:'number', value:val});
-      else if(c.tipo === 'date') input = el('input', {type:'date', value:val});
+      else if(c.tipo === 'date') input = el('input', {type:'date', value:fechaISO(val) || val});
       else if(c.tipo === 'pk') input = inPK({placeholder:'45+320', value:val});
       else if(c.tipo === 'photo'){ input = el('input', {type:'hidden', value:val}); extra = fotoWidget(input, ro); }
       else if(c.tipo === 'focos'){ input = el('input', {type:'hidden', value:val}); extra = focosWidget(input, ro); }
@@ -8834,10 +8963,16 @@ async function exportXLSX(){
   state.elementTypes.forEach(t => {
     const campos = t.campos.map(r => getCampo(r.campoId)).filter(campoExportable);
     const ws = wb.addWorksheet(nombreHoja(t.nombre));
-    ws.columns = [{header:'Código', key:'codigo', width:16}, ...campos.map(c => ({header:c.etiqueta + (t.campos.find(r => r.campoId === c.id).obligatorio ? ' *' : ''), key:c.id, width:22}))];
+    /* «*» solo en los obligatorios siempre (la segunda vía solo lo es si Lado = Entrevías) */
+    ws.columns = [{header:'Código', key:'codigo', width:16}, ...campos.map(c => { const ref = t.campos.find(r => r.campoId === c.id);
+      return {header:c.etiqueta + (ref.obligatorio && !(ref.regla && ref.regla.conds && ref.regla.conds.length) ? ' *' : ''), key:c.id, width:22}; })];
     ws.getRow(1).font = {bold:true};
     const filas = base.filter(e => e.tipoId === t.id);
-    filas.forEach(e => { const row = {codigo:e.codigo || ''}; campos.forEach(c => row[c.id] = e.valores[c.id] || ''); ws.addRow(row); });
+    /* las fechas van como fecha de Excel (dd/mm/aaaa): se ordenan y filtran como fechas y, al
+       volver a importarlas, se leen igual que si se escriben a mano en cualquier formato */
+    const aFecha = v => { const f = fechaISO(v); if(!f) return v || ''; const [y, m, d] = f.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d)); };
+    filas.forEach(e => { const row = {codigo:e.codigo || ''}; campos.forEach(c => row[c.id] = c.tipo === 'date' ? aFecha(e.valores[c.id]) : (e.valores[c.id] || '')); ws.addRow(row); });
+    campos.forEach(c => { if(c.tipo === 'date'){ ws.getColumn(c.id).numFmt = 'dd/mm/yyyy'; ws.getColumn(c.id).width = 14; } });
     const RELLENO = 15;
     for(let i = 0; i < RELLENO; i++) ws.addRow({codigo:''});
     const lastRow = 1 + filas.length + RELLENO;
@@ -8877,8 +9012,9 @@ async function exportXLSX(){
 }
 function celTexto(v){
   if(v == null) return '';
-  if(typeof v === 'object'){ if(v.text != null) return String(v.text); if(v.result != null) return String(v.result); if(v.richText) return v.richText.map(r => r.text).join(''); return ''; }
-  if(v instanceof Date) return v.toISOString().slice(0, 10);
+  /* la fecha antes que «object»: un Date también lo es, y se leía como celda vacía */
+  if(v instanceof Date) return isNaN(v.getTime()) ? '' : v.toISOString().slice(0, 10);
+  if(typeof v === 'object'){ if(v.text != null) return String(v.text); if(v.result != null) return celTexto(v.result); if(v.richText) return v.richText.map(r => r.text).join(''); return ''; }
   return String(v);
 }
 async function importarXLSXFile(file){
@@ -8888,7 +9024,10 @@ async function importarXLSXFile(file){
     const buf = await file.arrayBuffer();
     const wb = new ExcelJS.Workbook();
     try{ await wb.xlsx.load(buf); }catch(err){ alert('No se pudo leer el Excel: ' + err.message); return; }
-    let creados = 0, actualizados = 0, camposRellenados = 0;
+    /* 1) leer todas las filas */
+    const filas = [];
+    let fechasMal = 0;
+    const crudo = v => (v && typeof v === 'object' && !(v instanceof Date) && v.result != null) ? v.result : v;
     state.elementTypes.forEach(t => {
       const ws = wb.worksheets.find(w => w.name === nombreHoja(t.nombre)); if(!ws) return;
       const campos = t.campos.map(r => getCampo(r.campoId)).filter(campoExportable);
@@ -8898,38 +9037,92 @@ async function importarXLSXFile(file){
         const h = celTexto(header[i]).replace(/\s*\*$/, '').trim();
         const c = campos.find(cc => cc.etiqueta === h); if(c) colFor[i] = c.id;
       }
-      const pid_ = state.proyectoActivo, now = Date.now();
       for(let r = 2; r <= ws.rowCount; r++){
         const row = ws.getRow(r);
         const cod = celTexto(row.getCell(1).value).trim();
         const valores = {}; let algo = false;
-        Object.keys(colFor).forEach(i => { const v = celTexto(row.getCell(+i).value).trim(); if(v){ valores[colFor[i]] = v; algo = true; } });
+        Object.keys(colFor).forEach(i => {
+          const cid = colFor[i], cell = row.getCell(+i).value;
+          let v = celTexto(cell).trim(); if(!v) return;
+          /* fechas: se guardan siempre como AAAA-MM-DD, vengan como vengan */
+          if((getCampo(cid) || {}).tipo === 'date'){ const f = fechaISO(crudo(cell)) || fechaISO(v); if(f) v = f; else fechasMal++; }
+          valores[cid] = v; algo = true;
+        });
         if(!cod && !algo) continue;
-        /* El código sólo es único DENTRO de una estación: hay una E1, una S1/1 y un CV E1 en
-           cada una. Sin la estación en la identidad, la segunda fila con el mismo código
-           «actualizaba» la primera y se perdían decenas de elementos al importar. */
-        const estF = String(valores.f_est || '').trim().toLowerCase();
-        const mismo = e => e.tipoId === t.id && (e.codigo || '').trim().toLowerCase() === cod.toLowerCase();
-        let ex = cod ? elementosProy().find(e => mismo(e) && String(e.valores.f_est || '').trim().toLowerCase() === estF) : null;
-        if(!ex && cod && estF){
-          /* elementos antiguos sin estación (importados de un PDF): se acepta uno solo */
-          const viejos = elementosProy().filter(e => mismo(e) && !String(e.valores.f_est || '').trim());
-          if(viejos.length === 1) ex = viejos[0];
-        }
-        if(ex){
-          const huecos = Object.keys(valores).filter(cid => !ex.valores[cid]);
-          const cambio = huecos.length > 0;
-          if(cambio) histGuardar(ex, now, 'Excel');
-          huecos.forEach(cid => { ex.valores[cid] = valores[cid]; camposRellenados++; });
-          if(cambio){ ex.modificado = now; registrarCambio('edición (Excel)', (ex.codigo || t.nombre) + ': ' + Object.keys(valores).length + ' campo(s) revisados', ex.id); actualizados++; }
-        } else if(algo || cod){
-          const nid = uid();
-          state.elementos.push({id:nid, proyectoId:pid_, tipoId:t.id, codigo:cod, valores, hist:[], plano:null, creado:now, modificado:now});
-          registrarCambio('alta (Excel)', (cod || t.nombre) + ' (' + t.nombre + ')', nid);
-          creados++;
-        }
+        filas.push({t, cod, valores, hoja:ws.name, fila:r});
       }
     });
+    /* 2) ¿qué filas repiten un elemento que ya está en el proyecto, u otra fila del propio Excel?
+       Con código: mismo tipo + código + estación (el código solo es único DENTRO de una estación).
+       Sin código: mismo tipo + PK + vía + lado + estación. */
+    const base = elementosProy();
+    const minus = x => String(x || '').trim().toLowerCase();
+    const firmaPk = (tipoId, valores) => { const q = elemPK({tipoId, valores}); return [q.ini, q.fin, q.pu].map(k => isFinite(k) ? Math.round(k * 1000) : '').join('/'); };
+    const ubic = (tipoId, valores) => { const t = getTipo(tipoId), vr = t ? viaRefDe(t) : null;
+      return firmaPk(tipoId, valores) + '|' + minus(vr ? valores[vr] : '') + '|' + minus(valores.f_lado) + '|' + minus(valores[CAMPO_VIA2]); };
+    const clave = (tipoId, cod, valores) => {
+      if(cod) return tipoId + '#c#' + minus(cod) + '#' + minus(valores.f_est);
+      const u = ubic(tipoId, valores); return /^\/\/\|/.test(u) ? '' : tipoId + '#u#' + u + '#' + minus(valores.f_est);
+    };
+    /* puede haber varios elementos con la misma clave (p. ej. códigos repetidos sin estación):
+       cada fila se empareja con UNO todavía libre, primero el que está en su mismo PK */
+    const porClave = new Map(), usados = new Set();
+    base.forEach(e => { const k = clave(e.tipoId, vStr(e.codigo).trim(), e.valores); if(k){ if(!porClave.has(k)) porClave.set(k, []); porClave.get(k).push(e); } });
+    const vistas = new Map();
+    filas.forEach((f, n) => {
+      f.n = n;
+      const k = clave(f.t.id, f.cod, f.valores);
+      const cands = (k && porClave.get(k)) || [], libres = cands.filter(e => !usados.has(e.id)), fp = firmaPk(f.t.id, f.valores);
+      let ex = libres.find(e => firmaPk(e.tipoId, e.valores) === fp) || libres[0] || null;
+      if(!ex && f.cod && minus(f.valores.f_est)){
+        /* elementos antiguos sin estación (importados de un PDF): se acepta uno solo */
+        const viejos = base.filter(e => e.tipoId === f.t.id && minus(e.codigo) === minus(f.cod) && !minus(e.valores.f_est));
+        if(viejos.length === 1 && !usados.has(viejos[0].id)) ex = viejos[0];
+      }
+      const prev = k ? vistas.get(k) : null;
+      if(ex){ f.contra = {el:ex}; usados.add(ex.id); }
+      else if(prev) f.contra = {fila:prev};
+      if(k && !prev) vistas.set(k, f);
+      /* diferencias con lo que repite (solo cuentan las celdas rellenas del Excel) */
+      const ref = f.contra ? (f.contra.el ? {codigo:f.contra.el.codigo, valores:f.contra.el.valores} : {codigo:f.contra.fila.cod, valores:f.contra.fila.valores}) : null;
+      f.difs = ref ? Object.keys(f.valores).filter(cid => vStr(ref.valores[cid]).trim() !== f.valores[cid]).map(cid => ({cid, antes:vStr(ref.valores[cid]).trim(), ahora:f.valores[cid]})) : [];
+      /* acción por defecto: nunca duplicar. Repetida del proyecto → superponer. Repetida dentro del
+         propio Excel: idéntica → omitir; con otro PK → son dos elementos con el mismo código → ambos */
+      if(f.contra){
+        if(f.contra.el) f.accion = f.difs.length ? 'sup' : 'omit';
+        else f.accion = !f.difs.length ? 'omit' : (firmaPk(f.t.id, f.valores) !== firmaPk(f.t.id, f.contra.fila.valores) ? 'ambos' : 'sup');
+      }
+    });
+    const repes = filas.filter(f => f.contra);
+    const aplicar = () => {
+      let creados = 0, actualizados = 0, camposRellenados = 0, omitidos = 0;
+      const pid_ = state.proyectoActivo, now = Date.now();
+      const crear = f => {
+        const nid = uid();
+        const e = {id:nid, proyectoId:pid_, tipoId:f.t.id, codigo:f.cod, valores:Object.assign({}, f.valores), hist:[], plano:null, creado:now, modificado:now};
+        state.elementos.push(e);
+        registrarCambio('alta (Excel)', (f.cod || f.t.nombre) + ' (' + f.t.nombre + ')', nid);
+        creados++; return e;
+      };
+      const superponer = (e, f) => {
+        const cambian = Object.keys(f.valores).filter(cid => vStr(e.valores[cid]).trim() !== f.valores[cid]);
+        if(!cambian.length) return;
+        histGuardar(e, now, 'Excel');
+        cambian.forEach(cid => { e.valores[cid] = f.valores[cid]; camposRellenados++; });
+        e.modificado = now;
+        registrarCambio('edición (Excel)', (e.codigo || f.t.nombre) + ': ' + cambian.length + ' campo(s) del Excel superpuesto(s)', e.id);
+        actualizados++;
+      };
+      filas.forEach(f => {
+        if(!f.contra){ f.el = crear(f); return; }
+        if(f.accion === 'omit'){ f.el = f.contra.el || f.contra.fila.el || null; omitidos++; return; }
+        if(f.accion === 'ambos'){ f.el = crear(f); return; }
+        const dest = f.contra.el || f.contra.fila.el;
+        if(dest){ superponer(dest, f); f.el = dest; } else f.el = crear(f);
+      });
+      return {creados, actualizados, camposRellenados, omitidos};
+    };
+    const terminar = res => {
     /* Geometría del esquema: el Excel que exporta Diseño trae las hojas «Lugares» y «Vias
        esquema». Sin ellas, las vías secundarias, los apartaderos y las toperas no saben de qué
        vía salen ni por qué extremo se conectan, y el esquema sale descuadrado. */
@@ -8972,9 +9165,76 @@ async function importarXLSXFile(file){
       }
     }
     save(); currentView = 'bd'; render();
-    alert('Importación completada: ' + creados + ' elemento(s) nuevo(s), ' + actualizados + ' actualizado(s) con ' + camposRellenados + ' campo(s) rellenado(s).'
-      + (nLug || nVia ? '\n· ' + nLug + ' lugar(es) y ' + nVia + ' vía(s) del esquema.' : ''));
+    alert('Importación completada: ' + res.creados + ' elemento(s) nuevo(s), ' + res.actualizados + ' actualizado(s) con ' + res.camposRellenados + ' campo(s) superpuesto(s)'
+      + (res.omitidos ? ', ' + res.omitidos + ' fila(s) repetida(s) omitida(s)' : '') + '.'
+      + (nLug || nVia ? '\n· ' + nLug + ' lugar(es) y ' + nVia + ' vía(s) del esquema.' : '')
+      + (fechasMal ? '\n· ' + fechasMal + ' fecha(s) no se entendieron y se guardaron tal cual: revísalas.' : ''));
+    };
+    if(!repes.length){ terminar(aplicar()); return; }
+    importarRepetidosModal(repes, () => terminar(aplicar()));
   });
+}
+/* Lista de filas del Excel que repiten un elemento (del proyecto o del propio Excel) y qué hacer con
+   cada una: superponer (el Excel manda en las celdas que trae rellenas), mantener ambos (se crea
+   otro elemento) u omitir (la fila no se importa). Por defecto nunca se duplica. */
+function importarRepetidosModal(repes, alAceptar){
+  const ACC = [['sup', 'Superponer'], ['ambos', 'Mantener ambos'], ['omit', 'Omitir']];
+  const conDif = repes.filter(f => f.difs.length), iguales = repes.filter(f => !f.difs.length);
+  const pkTxt = f => { const q = elemPK({tipoId:f.t.id, valores:f.valores});
+    return !isNaN(q.ini) && !isNaN(q.fin) ? toPkMas(q.ini) + ' – ' + toPkMas(q.fin) : (!isNaN(q.pu) ? toPkMas(q.pu) : '—'); };
+  const viaTxt = f => { const vr = viaRefDe(f.t); const v = vr ? vStr(f.valores[vr]) : ''; const v2 = vStr(f.valores[CAMPO_VIA2]);
+    return (v || '—') + (v2 && /entrev/i.test(vStr(f.valores.f_lado)) ? ' / ' + v2 : ''); };
+  const conQue = f => f.contra.el ? 'Elemento del proyecto' + (f.contra.el.codigo ? ' «' + f.contra.el.codigo + '»' : '') : 'Fila ' + f.contra.fila.fila + ' de la hoja «' + f.contra.fila.hoja + '»';
+  const selects = [];
+  const selAcc = (f, onch) => {
+    const s = el('select', {style:'width:auto'}, ...ACC.map(([v, t]) => el('option', {value:v, ...(v === f.accion ? {selected:'selected'} : {})}, t)));
+    s.addEventListener('change', () => { f.accion = s.value; if(onch) onch(); cuenta(); });
+    selects.push({s, f}); return s;
+  };
+  const resumen = el('div', {class:'hint', style:'margin:6px 0 10px'});
+  const cuenta = () => {
+    const n = k => repes.filter(f => f.accion === k).length;
+    resumen.textContent = repes.length + ' fila(s) repetida(s): ' + n('sup') + ' se superponen, ' + n('ambos') + ' se crean aparte, ' + n('omit') + ' se omiten.';
+  };
+  const todas = acc => { repes.forEach(f => f.accion = acc); selects.forEach(x => { x.s.value = x.f.accion; }); cuenta(); };
+  const body = el('div', null,
+    el('p', {class:'hint', style:'margin-top:0'}, 'Estas filas del Excel ya están en el proyecto (mismo tipo, código y estación; o, sin código, mismo PK, vía y lado) o se repiten dentro del propio Excel. Elige qué hacer con cada una. Nada se duplica salvo que elijas «Mantener ambos».'),
+    el('div', {class:'chips'},
+      el('span', {class:'lab'}, 'A todas:'),
+      ...ACC.map(([v, t]) => el('button', {type:'button', class:'btn sm ghost', onclick:() => todas(v)}, t))),
+    resumen);
+  if(conDif.length){
+    const tb = el('table', {class:'dztbl'});
+    tb.appendChild(el('tr', null, ...['Tipo', 'Código', 'PK', 'Vía', 'Repite', 'Qué cambia (actual → Excel)', 'Acción'].map(h => el('th', null, h))));
+    conDif.forEach(f => {
+      const difs = el('div', {style:'font-size:12px;line-height:1.35'},
+        ...f.difs.slice(0, 6).map(d => { const c = getCampo(d.cid) || {}, ver = x => { if(!x) return '(vacío)'; const iso = c.tipo === 'date' ? fechaISO(x) : '';
+          return iso ? iso.split('-').reverse().join('/') : x; };
+          return el('div', null, el('b', null, (c.etiqueta || d.cid) + ': '), ver(d.antes) + ' → ' + ver(d.ahora)); }),
+        f.difs.length > 6 ? el('div', {class:'hint'}, '… y ' + (f.difs.length - 6) + ' más') : null);
+      tb.appendChild(el('tr', null, el('td', null, f.t.nombre), el('td', null, f.cod || '—'), el('td', null, pkTxt(f)), el('td', null, viaTxt(f)),
+        el('td', null, conQue(f)), el('td', null, difs), el('td', null, selAcc(f))));
+    });
+    body.appendChild(el('div', {style:'overflow:auto'}, tb));
+  }
+  if(iguales.length){
+    /* las idénticas no cambian nada si se superponen: van juntas y plegadas */
+    const sGrupo = el('select', {style:'width:auto'}, ...ACC.map(([v, t]) => el('option', {value:v, ...(v === 'omit' ? {selected:'selected'} : {})}, t)));
+    const tb = el('table', {class:'dztbl'});
+    tb.appendChild(el('tr', null, ...['Tipo', 'Código', 'PK', 'Vía', 'Repite', 'Acción'].map(h => el('th', null, h))));
+    iguales.forEach(f => tb.appendChild(el('tr', null, el('td', null, f.t.nombre), el('td', null, f.cod || '—'), el('td', null, pkTxt(f)), el('td', null, viaTxt(f)), el('td', null, conQue(f)), el('td', null, selAcc(f)))));
+    sGrupo.addEventListener('change', () => { iguales.forEach(f => f.accion = sGrupo.value); selects.forEach(x => { x.s.value = x.f.accion; }); cuenta(); });
+    body.appendChild(el('div', {style:'margin-top:12px'}, iguales.length + ' fila(s) idéntica(s) a lo que ya hay (superponerlas no cambia nada): ', sGrupo));
+    body.appendChild(el('details', null,
+      el('summary', {class:'hint'}, 'Ver la lista'),
+      el('div', {style:'overflow:auto'}, tb)));
+  }
+  cuenta();
+  openModal('Importar Excel · elementos repetidos', body, () => { alAceptar(); });
+  if(modalEl){
+    const m = /** @type {HTMLElement} */ (modalEl.querySelector('.modal')); if(m) m.style.maxWidth = '1000px';
+    const g = modalEl.querySelector('.modal-f .btn.red'); if(g) g.textContent = 'Importar';
+  }
 }
 function exportProyectoJSON(){
   descargar('via-seguimiento_' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(state, null, 2), 'application/json');
