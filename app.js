@@ -314,6 +314,9 @@ function migrar(){
     if(!Array.isArray(p.andenes)) p.andenes = [];
     if(!Array.isArray(p.replanteos)) p.replanteos = [];
     p.lugares.forEach(l => { if(!l.tipo) l.tipo = tipoLugarDefecto(l.nombre); });
+    /* la vía 1 se daba de alta como «secundaria que sale de la 1» porque no había tipo General */
+    p.vias.forEach(v => { if(v.tipo !== 'general' && v.tipo !== 'topera' && /^1(\D|$)/.test(String(v.num || '').trim()) && (!v.padre || String(v.padre) === String(v.num))){ v.tipo = 'general'; v.padre = ''; } });
+    if(!Array.isArray(p.capas)) p.capas = [];
     if(!Array.isArray(p.documentos)) p.documentos = [];
     if(!Array.isArray(p.carpetasDoc)) p.carpetasDoc = [];
     if(p.modo !== 'diseno' && p.modo !== 'seguimiento') p.modo = 'seguimiento';
@@ -5635,9 +5638,11 @@ function esqZoomBtn(f){
 let _rrRAF = 0, _rlT = 0;
 function reRenderPronto(){ cancelAnimationFrame(_rrRAF); _rrRAF = requestAnimationFrame(render); }
 function reRenderLento(){ clearTimeout(_rlT); _rlT = setTimeout(render, 130); }
+/* vía general: la de línea (tipo «general»). Su PK inicio–fin cuenta para la extensión del esquema */
+const esViaGeneral = v => !!v && v.tipo === 'general';
 function viasConocidas(){
   const s = new Set();
-  (proyActivo().vias || []).forEach(v => { if(v.num != null && v.num !== '') s.add(String(v.num)); });
+  (proyActivo().vias || []).forEach(v => { if(v.num != null && v.num !== '' && !/^1(\D|$)/.test(String(v.num).trim())) s.add(String(v.num)); });
   elementosProy().forEach(e => {
     const v = String(viaDe(e) || '').trim();
     if(v && v !== '—' && !/^1(\D|$)/.test(v)) s.add(v);
@@ -5691,10 +5696,15 @@ function nuevaViaModal(existing, pk1, pk2){
   const pr = proyActivo(); pr.vias = pr.vias || [];
   const esEdit = !!existing;
   const inNum = el('input', {value:esEdit ? existing.num : '', placeholder:'3'});
-  const tipoInicial = esEdit ? existing.tipo : 'secundaria';
+  /* sin vía general declarada, la primera vía nueva se propone como general (vía 1) */
+  const hayGeneral = pr.vias.some(esViaGeneral);
+  const tipoInicial = esEdit ? (existing.tipo === 'topera' || existing.tipo === 'general' ? existing.tipo : 'secundaria')
+                             : (hayGeneral || pk1 != null ? 'secundaria' : 'general');
   const selTipo = el('select', null,
-    el('option', {value:'secundaria', ...(tipoInicial !== 'topera' ? {selected:'selected'} : {})}, 'Secundaria (sale y vuelve)'),
+    el('option', {value:'general', ...(tipoInicial === 'general' ? {selected:'selected'} : {})}, 'General (vía de línea)'),
+    el('option', {value:'secundaria', ...(tipoInicial === 'secundaria' ? {selected:'selected'} : {})}, 'Secundaria (sale y vuelve)'),
     el('option', {value:'topera', ...(tipoInicial === 'topera' ? {selected:'selected'} : {})}, 'Topera (sin retorno)'));
+  if(!esEdit && tipoInicial === 'general') inNum.value = '1';
 
   const conocidas = viasConocidas().filter(n => !esEdit || n !== String(existing.num));
   const padreInicial = esEdit ? String(existing.padre) : '';
@@ -5730,34 +5740,47 @@ function nuevaViaModal(existing, pk1, pk2){
   const inB = inPK({value:valB != null ? toPkMas(valB) : '', placeholder:'19+300'});
   const inCon = inPK({value:valCon != null ? toPkMas(valCon) : '', placeholder:'19+050'});
   const inLong = el('input', {value:valLong, placeholder:'+200 ó -200'});
-  const esTop = tipoInicial === 'topera';
-  const grpSec = el('div', {class:'cols2', style:esTop ? 'display:none' : ''},
-    el('div', {class:'field'}, el('span', {class:'flab'}, 'PK inicio (punto de salida)'), inA),
-    el('div', {class:'field'}, el('span', {class:'flab'}, 'PK fin (punto de retorno)'), inB));
-  const grpTop = el('div', {class:'cols2', style:esTop ? '' : 'display:none'},
+  const labA = el('span', {class:'flab'}), labB = el('span', {class:'flab'});
+  const grpSec = el('div', {class:'cols2'},
+    el('div', {class:'field'}, labA, inA),
+    el('div', {class:'field'}, labB, inB));
+  const grpTop = el('div', {class:'cols2'},
     el('div', {class:'field'}, el('span', {class:'flab'}, 'PK de conexión'), inCon),
     el('div', {class:'field'}, el('span', {class:'flab'}, 'Longitud (m) con signo'), inLong));
-  selTipo.addEventListener('change', () => {
-    const top = selTipo.value === 'topera';
+  /* «Sale de» solo tiene sentido en secundarias y toperas: la general es la vía de línea */
+  const fldPad = el('div', {class:'field'}, el('span', {class:'flab'}, 'Sale de'), selPad, inPadOtra);
+  const hintTop = el('p', {class:'hint', style:'margin-top:0'}, 'Topera: longitud +200 = hacia PK creciente (derecha); −200 = hacia PK decreciente (izquierda).');
+  const hintGen = el('p', {class:'hint', style:'margin-top:0'}, 'La vía general marca hasta dónde llega el esquema: si la amplías (p. ej. hasta el PK 32), el esquema se alarga aunque todavía no haya elementos allí.');
+  const ajustaTipo = () => {
+    const tp = selTipo.value, top = tp === 'topera', gen = tp === 'general';
     grpSec.style.display = top ? 'none' : ''; grpTop.style.display = top ? '' : 'none';
-  });
+    fldPad.style.display = gen ? 'none' : ''; hintTop.style.display = top ? '' : 'none'; hintGen.style.display = gen ? '' : 'none';
+    labA.textContent = gen ? 'PK inicio' : 'PK inicio (punto de salida)';
+    labB.textContent = gen ? 'PK fin' : 'PK fin (punto de retorno)';
+  };
+  selTipo.addEventListener('change', () => { if(selTipo.value === 'general' && !inNum.value.trim() && !hayGeneral) inNum.value = '1'; ajustaTipo(); });
+  ajustaTipo();
 
   openModal(esEdit ? 'Editar vía' : 'Nueva vía',
     el('div', null,
       el('div', {class:'cols2'},
         el('div', {class:'field'}, el('span', {class:'flab'}, 'Número de vía'), inNum),
         el('div', {class:'field'}, el('span', {class:'flab'}, 'Tipo de vía'), selTipo)),
-      el('div', {class:'field'}, el('span', {class:'flab'}, 'Sale de'), selPad, inPadOtra),
+      fldPad,
       el('div', {class:'field'}, el('span', {class:'flab'}, 'Lugar al que pertenece'), selLugar),
-      grpSec, grpTop,
-      el('p', {class:'hint', style:'margin-top:0'}, 'Topera: longitud +200 = hacia PK creciente (derecha); −200 = hacia PK decreciente (izquierda).')
+      grpSec, grpTop, hintTop, hintGen
     ),
     () => {
       const num = inNum.value.trim(); if(!num){ alert('Pon el número de vía.'); return false; }
       const padre = selPad.value === '__otra' ? (inPadOtra.value.trim() || '1') : (selPad.value || '1');
       const lugar = selLugar.value || 'general';
+      if(selTipo.value !== 'general' && padre === num){ alert('Una vía no puede salir de sí misma. Si es la vía de línea, elige el tipo «General».'); return false; }
       let rec;
-      if(selTipo.value === 'topera'){
+      if(selTipo.value === 'general'){
+        const a = pkNum(inA.value), b = pkNum(inB.value);
+        if(isNaN(a) || isNaN(b)){ alert('Pon PK inicio y fin válidos.'); return false; }
+        rec = {num, padre:'', lugar, tipo:'general', pkIni:Math.min(a, b), pkFin:Math.max(a, b)};
+      } else if(selTipo.value === 'topera'){
         const con = pkNum(inCon.value), L = parseFloat(String(inLong.value).replace(',', '.'));
         if(isNaN(con) || !isFinite(L) || L === 0){ alert('Pon el PK de conexión y una longitud (m) distinta de 0.'); return false; }
         const end = con + L / 1000;
@@ -5768,7 +5791,9 @@ function nuevaViaModal(existing, pk1, pk2){
         rec = {num, padre, lugar, tipo:'secundaria', pkIni:Math.min(a, b), pkFin:Math.max(a, b)};
       }
       if(esEdit){ Object.assign(existing, rec); registrarCambio('vía', 'editada vía ' + num); }
-      else { pr.vias.push(Object.assign({id:uid()}, rec)); registrarCambio('vía', 'añadida vía ' + num + ' desde vía ' + padre); }
+      else { pr.vias.push(Object.assign({id:uid()}, rec)); registrarCambio('vía', 'añadida vía ' + num + (rec.tipo === 'general' ? ' (general)' : ' desde vía ' + padre)); }
+      /* el esquema tiene que volver a ajustarse a la nueva extensión */
+      if(rec.tipo === 'general'){ esqZoom = null; esqSoltarAncla(); }
       esqDibVia = false; esqDibP = null; save(); render();
     },
     esEdit ? () => {
@@ -5796,7 +5821,7 @@ function configVias(){
       el('span', {class:'flab'}, 'Dibujadas manualmente'),
       (pr.vias || []).length ? el('div', {class:'list'}, ...pr.vias.map(v => el('div', {class:'row pick', onclick:() => { closeModal(); nuevaViaModal(v); }},
         el('span', {class:'grow'}, 'Vía ' + v.num + '  ', el('span', {style:'color:var(--tx3)'},
-          '· ' + (v.tipo === 'topera' ? 'topera' : 'secundaria') + ' desde vía ' + v.padre +
+          '· ' + (v.tipo === 'general' ? 'general' : (v.tipo === 'topera' ? 'topera' : 'secundaria') + ' desde vía ' + v.padre) +
           ' · ' + (v.lugar && v.lugar !== 'general' ? ((pr.lugares || []).find(l => l.id === v.lugar) || {}).nombre || 'lugar' : 'GENERAL') +
           ' · ' + toPkStr(v.pkIni) + '–' + toPkStr(v.pkFin))),
         el('button', {class:'btn icon sm danger', onclick:ev => { ev.stopPropagation(); pr.vias = pr.vias.filter(x => x.id !== v.id); registrarCambio('vía', 'borrada vía ' + v.num); save(); closeModal(); quitarPreguntaViaElementos(v.num); configVias(); }}, '✕')
@@ -6376,7 +6401,7 @@ function viewEsquema(){
     tb2.appendChild(botonAnadir());
     tb2.appendChild(botonOrden());
     const nDet = viasDetectadas().length;
-    if(vias.length || nDet) tb2.appendChild(el('button', {class:'btn sm', onclick:() => configVias()}, 'Vías (' + vias.length + (nDet ? ' + ' + nDet : '') + ')'));
+    tb2.appendChild(el('button', {class:'btn sm', onclick:() => configVias()}, 'Vías (' + vias.length + (nDet ? ' + ' + nDet : '') + ')'));
     const lugares = proyActivo().lugares || [];
     tb2.appendChild(el('button', {class:'btn sm', onclick:() => configLugares()}, 'Lugares (' + lugares.length + ')'));
     tb2.appendChild(el('button', {class:'btn sm', onclick:() => configAndenes()}, 'Andenes (' + (proyActivo().andenes || []).length + ')'));
@@ -6385,6 +6410,7 @@ function viewEsquema(){
       ...[...new Set(lugares.map(l => l.tipo))].map(tp => el('optgroup', {label:tp},
         ...lugares.filter(l => l.tipo === tp).map(l => el('option', {value:l.id, ...(l.id === esqLugar ? {selected:'selected'} : {})}, l.nombre))))));
     tb2.appendChild(btnFiltros(elsAll, tiposPresentes));
+    tb2.appendChild(btnCapas(elsAll, tiposPresentes));
     if(hayFiltrosActivos()) tb2.appendChild(el('button', {class:'btn sm', onclick:() => { limpiarFiltros(); render(); }}, '✕ Filtros'));
     tb2.appendChild(el('span', {class:'spacer'}));
     tb2.appendChild(el('span', {style:'font-size:12px;color:var(--tx3)'}, conPk.length + ' con PK · ' + sinPk.length + ' sin PK'));
@@ -6780,6 +6806,10 @@ function esquemaCanvas(conPk, sinPk, elsAll){
     const pks = [];
     paraExtent.forEach(d => [d.p.ini, d.p.fin, d.p.pu].forEach(v => { if(isFinite(v)) pks.push(v); }));
     if(!pks.length) viasDef.forEach(v => { [v.pkIni, v.pkFin].forEach(k => { if(k != null && k !== '' && isFinite(k)) pks.push(+k); }); });
+    /* la vía GENERAL sí marca la extensión aunque haya elementos: ampliarla de 0–25 a 0–32 alarga el
+       esquema. Un PK de la general a más de 50 km del resto (p. ej. 0–200) queda fuera igual que un
+       PK mal tecleado (pkRangoPrincipal) */
+    else viasDef.filter(esViaGeneral).forEach(v => { [v.pkIni, v.pkFin].forEach(k => { if(k != null && k !== '' && isFinite(k)) pks.push(+k); }); });
     const r = pkRangoPrincipal(pks) || {mn:0, mx:1};
     mn = r.mn; mx = r.mx;
     (elsAll || []).forEach(e => {
@@ -6873,7 +6903,16 @@ function esquemaCanvas(conPk, sinPk, elsAll){
   };
   /* vías dibujadas por el usuario */
   const viasDefNums = new Set(viasDef.map(v => String(v.num)));
-  viasDef.forEach(v => { peine(String(v.num), v.pkIni, v.pkFin, esMain(v.padre) ? baseY : yFor(v.padre), v.tipo === 'topera', v.ladoCon || 'ini'); });
+  viasDef.forEach(v => {
+    /* general: la 1 es la línea base; otra general (vía 2 de una doble) va recta, sin peines */
+    if(esViaGeneral(v)){
+      if(esMain(v.num)) return;
+      const a = Math.max(+v.pkIni, mn), b = Math.min(+v.pkFin, mx); if(!(b > a)) return;
+      s += '<line x1="' + X(a).toFixed(1) + '" y1="' + yFor(String(v.num)) + '" x2="' + X(b).toFixed(1) + '" y2="' + yFor(String(v.num)) + '" stroke="#5a6b7a" stroke-width="2.5"/>';
+      return;
+    }
+    peine(String(v.num), v.pkIni, v.pkFin, esMain(v.padre) ? baseY : yFor(v.padre), v.tipo === 'topera', v.ladoCon || 'ini');
+  });
   /* auto: zonas de estación para vías referenciadas por elementos y no dibujadas */
   const secEls = conVia2(vis).filter(d => !esMain(d.via) && !viasDefNums.has(String(d.via).trim()));
   const secPks = [];
@@ -7573,38 +7612,49 @@ function camposFiltroDeTipo(t){
     .slice(0, 2);
 }
 function valOr(e, cid){ const v = e.valores && e.valores[cid]; return (v != null && String(v).trim() !== '') ? String(v) : '∅'; }
-function pasaFiltros(e){
-  if(!filtroVis.size) return true;
-  if(filtroVis.has('t:' + e.tipoId)) return false;
-  if(filtroVis.has('e:' + (valorEstado(e) || '∅'))) return false;
-  if(filtroVis.size && [...filtroVis].some(k => k.indexOf('l:') === 0)){
+/* ¿pasa el elemento con este conjunto de claves OCULTAS? (lo usan los Filtros y cada Capa) */
+function pasaClaves(ocultos, e){
+  if(!ocultos.size) return true;
+  if(ocultos.has('t:' + e.tipoId)) return false;
+  if(ocultos.has('e:' + (valorEstado(e) || '∅'))) return false;
+  if([...ocultos].some(k => k.indexOf('l:') === 0)){
     const ls = lugaresDe(e);
     for(const tp of tiposLugar()){
       const l = ls.find(x => x.tipo === tp);
-      if(filtroVis.has(l ? 'l:' + l.id : 'l:∅:' + tp)) return false;
+      if(ocultos.has(l ? 'l:' + l.id : 'l:∅:' + tp)) return false;
     }
   }
   const t = getTipo(e.tipoId); if(!t) return true;
   let key = 'v:' + e.tipoId;
   for(const c of camposFiltroDeTipo(t)){
     key += '|' + c.id + '=' + valOr(e, c.id);
-    if(filtroVis.has(key)) return false;
+    if(ocultos.has(key)) return false;
   }
   return true;
 }
+/* visible = pasa los Filtros y, si hay capas encendidas, está en alguna de ellas */
+function pasaFiltros(e){ return pasaClaves(filtroVis, e) && pasaCapas(e); }
 function hayFiltrosActivos(){ return filtroVis.size > 0; }
 function limpiarFiltros(){ filtroVis.clear(); }
 function panelFiltros(base, tiposPresentes){
+  const body = el('div', null,
+    arbolFiltros(filtroVis, base, tiposPresentes, render),   /* actualiza también la vista de debajo al instante */
+    soloVer() ? null : el('div', {style:'margin-top:14px;border-top:1px solid var(--line2);padding-top:10px'},
+      el('button', {class:'btn sm', onclick:() => editarCapa(null, base, tiposPresentes, true)}, 'Guardar estos filtros como capa…')));
+  openModal('Filtros', body, null);
+}
+/* árbol de casillas (tipos › valores, estado, lugares) sobre un conjunto de claves ocultas `ocultos` */
+function arbolFiltros(ocultos, base, tiposPresentes, onChange){
   const body = el('div', null);
   const estados = [...new Set(base.map(valorEstado).filter(Boolean))].sort();
   const lug = (proyActivo().lugares || []).slice().sort((a, b) => a.pkIni - b.pkIni);
-  const refrescar = () => { pinta(); render(); };   /* actualiza el modal Y la vista de debajo al instante */
+  const refrescar = () => { pinta(); if(onChange) onChange(); };
   const chk = (key, label, depth, extra) => {
-    const on = !filtroVis.has(key);
+    const on = !ocultos.has(key);
     return el('label', {style:'display:flex;align-items:center;gap:8px;padding:5px 0 5px ' + (2 + depth * 20) + 'px;font-size:13px;cursor:pointer' + (on ? '' : ';opacity:.45')},
       el('input', {type:'checkbox', style:'width:16px;flex:0 0 auto', ...(on ? {checked:'checked'} : {}), onchange:ev => {
-        if(ev.target.checked){ for(const k of [...filtroVis]) if(k === key || k.indexOf(key + '|') === 0) filtroVis.delete(k); }
-        else filtroVis.add(key);
+        if(ev.target.checked){ for(const k of [...ocultos]) if(k === key || k.indexOf(key + '|') === 0) ocultos.delete(k); }
+        else ocultos.add(key);
         refrescar();
       }}),
       extra || null, el('span', null, label));
@@ -7612,8 +7662,8 @@ function panelFiltros(base, tiposPresentes){
   function pinta(){
     body.innerHTML = '';
     body.appendChild(el('div', {style:'display:flex;gap:8px;margin-bottom:8px'},
-      el('button', {class:'btn sm', onclick:() => { filtroVis.clear(); refrescar(); }}, 'Seleccionar todo'),
-      el('button', {class:'btn sm', onclick:() => { filtroVis.clear(); tiposPresentes.forEach(t => filtroVis.add('t:' + t.id)); refrescar(); }}, 'Quitar todo')));
+      el('button', {class:'btn sm', onclick:() => { ocultos.clear(); refrescar(); }}, 'Seleccionar todo'),
+      el('button', {class:'btn sm', onclick:() => { ocultos.clear(); tiposPresentes.forEach(t => ocultos.add('t:' + t.id)); refrescar(); }}, 'Quitar todo')));
     body.appendChild(el('div', {class:'flab'}, 'Elementos'));
     tiposPresentes.forEach(t => {
       body.appendChild(chk('t:' + t.id, t.nombre, 0, el('span', {class:'swatch', style:'background:' + (t.color || '#888')})));
@@ -7640,12 +7690,154 @@ function panelFiltros(base, tiposPresentes){
     });
   }
   pinta();
-  openModal('Filtros', body, null);
+  return body;
 }
 function btnFiltros(base, tiposPresentes){
   const n = filtroVis.size;
   return el('button', {class:'btn sm' + (n ? ' red' : ''), onclick:() => panelFiltros(base, tiposPresentes)},
     'Filtros' + (n ? ' (' + n + ' oculto' + (n > 1 ? 's' : '') + ')' : ''));
+}
+
+/* ================= capas =================
+   Una capa es un juego de filtros con nombre, guardado en el proyecto (p.capas): las mismas casillas
+   que Filtros (claves ocultas) más condiciones por campo (p. ej. «Observaciones contiene antigua»).
+   Encender una capa muestra solo lo suyo; con varias encendidas se ve lo de cualquiera de ellas
+   (como las capas de un CAD). Los Filtros se aplican además por encima. Qué capas están encendidas
+   es de cada equipo (localStorage), no se sincroniza. */
+const CAPAS_KEY = 'via-capas-on';
+let capasOn = (() => { try { return JSON.parse(localStorage.getItem(CAPAS_KEY) || '{}') || {}; } catch(e){ return {}; } })();
+function capasProy(){ const pr = proyActivo(); return (pr && pr.capas) || []; }
+function capasActivas(){
+  const pr = proyActivo(); if(!pr) return [];
+  const on = capasOn[pr.id] || [];
+  return capasProy().filter(c => on.includes(c.id));
+}
+function capaEncender(id, on){
+  const pr = proyActivo(); if(!pr) return;
+  const s = new Set(capasOn[pr.id] || []);
+  if(on) s.add(id); else s.delete(id);
+  capasOn[pr.id] = [...s];
+  try { localStorage.setItem(CAPAS_KEY, JSON.stringify(capasOn)); } catch(e){ /* sin almacenamiento: dura la sesión */ }
+}
+const CAPA_OPS = [['es', 'es'], ['noEs', 'no es'], ['contiene', 'contiene'], ['noContiene', 'no contiene'], ['vacio', 'está vacío'], ['noVacio', 'no está vacío']];
+function condCapa(k, e){
+  const raw = k.campoId === '__codigo' ? e.codigo : (e.valores || {})[k.campoId];
+  const s = String(raw == null ? '' : raw).trim().toLowerCase(), v = String(k.valor == null ? '' : k.valor).trim().toLowerCase();
+  switch(k.op){
+    case 'es': return s === v;
+    case 'noEs': return s !== v;
+    case 'contiene': return s.includes(v);
+    case 'noContiene': return !s.includes(v);
+    case 'vacio': return !s;
+    case 'noVacio': return !!s;
+  }
+  return true;
+}
+const capaCache = new WeakMap();
+function pasaCapa(c, e){
+  const firma = (c.ocultos || []).join('\n');
+  let m = capaCache.get(c);
+  if(!m || m.firma !== firma){ m = {firma, set:new Set(c.ocultos || [])}; capaCache.set(c, m); }
+  return pasaClaves(m.set, e) && (c.conds || []).every(k => condCapa(k, e));
+}
+function pasaCapas(e){ const act = capasActivas(); return !act.length || act.some(c => pasaCapa(c, e)); }
+function btnCapas(base, tiposPresentes){
+  const n = capasActivas().length, tot = capasProy().length;
+  return el('button', {class:'btn sm' + (n ? ' red' : ''), title:'Juegos de filtros guardados con nombre', onclick:() => panelCapas(base, tiposPresentes)},
+    'Capas' + (n ? ' (' + n + ' de ' + tot + ')' : tot ? ' (' + tot + ')' : ''));
+}
+function panelCapas(base, tiposPresentes){
+  const body = el('div', null);
+  const pinta = () => {
+    body.innerHTML = '';
+    const caps = capasProy(), on = new Set(capasActivas().map(c => c.id));
+    if(!caps.length) body.appendChild(el('div', {class:'empty'}, 'Todavía no hay capas. Crea una (p. ej. «Canalización antigua») eligiendo qué elementos lleva.'));
+    else body.appendChild(el('div', {class:'list'}, ...caps.map(c => {
+      const n = base.filter(e => pasaCapa(c, e)).length;
+      return el('div', {class:'row'},
+        el('label', {style:'display:flex;align-items:center;gap:8px;cursor:pointer;flex:1;min-width:0'},
+          el('input', {type:'checkbox', style:'width:16px;flex:0 0 auto', ...(on.has(c.id) ? {checked:'checked'} : {}), onchange:ev => { capaEncender(c.id, ev.target.checked); pinta(); render(); }}),
+          el('span', {class:'grow', style:'min-width:0'}, c.nombre, el('span', {style:'color:var(--tx3);font-size:12px'}, '  · ' + n + ' elemento' + (n === 1 ? '' : 's') +
+            ((c.conds || []).length ? ' · ' + c.conds.length + ' condición' + (c.conds.length > 1 ? 'es' : '') : '')))),
+        el('button', {class:'btn sm', title:'Encender solo esta', onclick:() => { caps.forEach(x => capaEncender(x.id, x.id === c.id)); pinta(); render(); }}, 'Solo esta'),
+        soloVer() ? null : el('button', {class:'btn sm', onclick:() => editarCapa(c, base, tiposPresentes)}, 'Editar'));
+    })));
+    body.appendChild(el('div', {style:'display:flex;gap:8px;flex-wrap:wrap;margin-top:12px'},
+      soloVer() ? null : el('button', {class:'btn sm', onclick:() => editarCapa(null, base, tiposPresentes)}, '+ Nueva capa'),
+      soloVer() || !filtroVis.size ? null : el('button', {class:'btn sm', onclick:() => editarCapa(null, base, tiposPresentes, true)}, '+ Nueva desde los filtros actuales'),
+      on.size ? el('button', {class:'btn sm', onclick:() => { caps.forEach(x => capaEncender(x.id, false)); pinta(); render(); }}, 'Apagar todas') : null));
+    body.appendChild(el('p', {class:'hint'}, 'Con una capa encendida solo se ve lo suyo, en la base de datos, el esquema y el plano. Con varias, lo de cualquiera de ellas. Los Filtros se aplican además por encima. Qué capas tienes encendidas se recuerda en este equipo.'));
+  };
+  pinta();
+  openModal('Capas', body, null);
+}
+/* crear / editar una capa: nombre, casillas (como Filtros) y condiciones por campo */
+function editarCapa(capa, base, tiposPresentes, desdeFiltros){
+  if(soloLectura()) return;
+  const pr = proyActivo(); pr.capas = pr.capas || [];
+  const inNom = el('input', {value:capa ? capa.nombre : '', placeholder:'Canalización antigua'});
+  const ocultos = new Set(capa ? (capa.ocultos || []) : (desdeFiltros ? [...filtroVis] : []));
+  const conds = capa ? clone(capa.conds || []) : [];
+  const cuenta = el('div', {style:'font-size:13px;color:var(--tx2);margin:2px 0 8px'});
+  const actualiza = () => {
+    const tmp = {ocultos:[...ocultos], conds:conds.filter(k => k.campoId)};
+    const n = base.filter(e => pasaCapa(tmp, e)).length;
+    cuenta.textContent = 'Esta capa muestra ' + n + ' de ' + base.length + ' elementos.';
+  };
+  /* campos que llevan los tipos del proyecto, para las condiciones */
+  const idsCampos = new Set(); tiposPresentes.forEach(t => t.campos.forEach(r => idsCampos.add(r.campoId)));
+  const camposC = [{id:'__codigo', etiqueta:'Código', tipo:'text'}].concat([...idsCampos].map(getCampo)
+    .filter(c => c && !['photo', 'focos'].includes(c.tipo)).sort((a, b) => a.etiqueta.localeCompare(b.etiqueta, 'es')));
+  const cGet = id => camposC.find(c => c.id === id);
+  const zonaC = el('div', null);
+  const pintaConds = () => {
+    zonaC.innerHTML = '';
+    conds.forEach((k, i) => {
+      const c = cGet(k.campoId) || camposC[0];
+      const selC = el('select', {style:'flex:2;min-width:120px', onchange:ev => { k.campoId = ev.target.value; k.valor = ''; pintaConds(); actualiza(); }},
+        ...camposC.map(x => el('option', {value:x.id, ...(x.id === c.id ? {selected:'selected'} : {})}, x.etiqueta)));
+      const selO = el('select', {style:'flex:1;min-width:100px', onchange:ev => { k.op = ev.target.value; pintaConds(); actualiza(); }},
+        ...CAPA_OPS.map(([v, t]) => el('option', {value:v, ...(v === k.op ? {selected:'selected'} : {})}, t)));
+      let inV = null;
+      if(k.op !== 'vacio' && k.op !== 'noVacio'){
+        /* valores que ya existen en el proyecto para ese campo, además de las opciones de la lista */
+        const vals = new Set((c.opciones || []).map(String));
+        if(c.tipo === 'boolean'){ vals.add('Sí'); vals.add('No'); }
+        if(k.op === 'es' || k.op === 'noEs') base.forEach(e => { const v = c.id === '__codigo' ? e.codigo : (e.valores || {})[c.id]; if(v != null && String(v).trim() && vals.size < 300) vals.add(String(v).trim()); });
+        if((k.op === 'es' || k.op === 'noEs') && vals.size){
+          if(!k.valor) k.valor = [...vals][0];
+          inV = el('select', {style:'flex:2;min-width:120px', onchange:ev => { k.valor = ev.target.value; actualiza(); }},
+            ...[...vals].sort((a, b) => a.localeCompare(b, 'es', {numeric:true})).map(v => el('option', {value:v, ...(v === k.valor ? {selected:'selected'} : {})}, v)));
+        } else inV = el('input', {style:'flex:2;min-width:120px', value:k.valor || '', placeholder:'texto', oninput:ev => { k.valor = ev.target.value; actualiza(); }});
+      }
+      zonaC.appendChild(el('div', {style:'display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px'},
+        selC, selO, inV, el('button', {class:'btn icon sm danger', title:'Quitar condición', onclick:() => { conds.splice(i, 1); pintaConds(); actualiza(); }}, '✕')));
+    });
+    zonaC.appendChild(el('button', {class:'btn sm', onclick:() => { conds.push({campoId:'__codigo', op:'contiene', valor:''}); pintaConds(); actualiza(); }}, '+ Condición'));
+  };
+  pintaConds(); actualiza();
+  const volver = () => setTimeout(() => panelCapas(base, tiposPresentes), 0);
+  openModal(capa ? 'Editar capa' : 'Nueva capa',
+    el('div', null,
+      el('div', {class:'field'}, el('span', {class:'flab'}, 'Nombre de la capa'), inNom),
+      cuenta,
+      el('div', {class:'flab', style:'margin-top:6px'}, 'Qué elementos lleva'),
+      arbolFiltros(ocultos, base, tiposPresentes, actualiza),
+      el('div', {class:'flab', style:'margin-top:14px'}, 'Y además cumplen (opcional)'),
+      el('p', {class:'hint', style:'margin-top:0'}, 'Para separar elementos del mismo tipo: p. ej. Observaciones contiene «antigua», o Estado de montaje es «Existente». Tienen que cumplirse todas.'),
+      zonaC),
+    () => {
+      const nombre = inNom.value.trim(); if(!nombre){ alert('Pon un nombre a la capa.'); return false; }
+      const datos = {nombre, ocultos:[...ocultos], conds:conds.filter(k => k.campoId && (k.op === 'vacio' || k.op === 'noVacio' || String(k.valor || '').trim()))};
+      if(capa){ Object.assign(capa, datos); registrarCambio('capa', 'editada capa «' + nombre + '»'); }
+      else { const nueva = Object.assign({id:uid()}, datos); pr.capas.push(nueva); capaEncender(nueva.id, true); registrarCambio('capa', 'creada capa «' + nombre + '»'); }
+      save(); render(); volver();
+    },
+    capa ? () => {
+      if(!confirm('¿Borrar la capa «' + capa.nombre + '»? Los elementos no se tocan.')) return false;
+      pr.capas = pr.capas.filter(x => x.id !== capa.id); capaEncender(capa.id, false);
+      registrarCambio('capa', 'borrada capa «' + capa.nombre + '»'); save(); render(); volver();
+    } : null);
 }
 function viewBD(){
   const cont = el('div', null);
@@ -7657,6 +7849,7 @@ function viewBD(){
     el('button', {class:'btn red', onclick:() => nuevoElemento()}, '+ Añadir elemento'),
     el('button', {class:'btn', onclick:ordenModal}, '🎤 Orden por voz'),
     btnFiltros(base, tiposPresentes),
+    btnCapas(base, tiposPresentes),
     hayFiltrosActivos() ? el('button', {class:'btn sm', onclick:() => { limpiarFiltros(); render(); }}, '✕ Quitar filtros') : null,
     el('span', {class:'spacer'}),
     base.length ? el('button', {class:'btn', onclick:vaciarProyecto}, 'Vaciar proyecto')
@@ -8507,6 +8700,7 @@ function barraSeleccion(){
     rapido('f_cert', 'Certificación'),
     el('button', {class:'btn sm', onclick:() => bloqueEditarCampo(null)}, 'Otro campo…'),
     el('button', {class:'btn sm', onclick:bloqueVincularDoc}, 'Vincular documento…'),
+    els.length > 1 ? el('button', {class:'btn sm', title:'Juntar tramos lineales continuos (mismo tipo, vía, lado y demás campos) en un solo elemento', onclick:() => unificarModal()}, 'Unificar') : null,
     el('span', {class:'spacer'}),
     el('button', {class:'btn sm danger', onclick:bloqueBorrar}, 'Borrar'),
     el('button', {class:'btn sm', onclick:() => { selElems.clear(); selRefrescar(); }}, '✕ Quitar selección'));
@@ -8642,6 +8836,157 @@ function bloqueBorrar(){
   selElems.clear(); save(); render();
 }
 
+/* ================= unificar tramos lineales =================
+   Junta varios elementos lineales seleccionados (p. ej. canalización 2–4 y 4–6) en uno solo (2–6).
+   Condiciones: mismo tipo, todos con PK inicio y fin, continuos (junta ≤ 1 m, como en el esquema) y
+   el resto de campos iguales. Lo que no cuadre se avisa diciendo QUÉ elemento lo causa, con opciones:
+   abrirlo para cambiarlo, igualarlo, quitarlo de la selección o seguir igualmente eligiendo el valor.
+   Queda el tramo de PK más bajo (conserva su id, historial y documentos); los demás se dan de baja
+   y sus documentos pasan al que queda. Se deshace con ↶. */
+const UNI_JUNTA = 0.001 + 1e-9;
+const UNI_SUMA = ['f_long', 'f_cant', 'f_certcant'];   /* longitudes y cantidades: se suman */
+function pkCamposIF(t){
+  let ini = null, fin = null;
+  t.campos.forEach(r => {
+    const c = getCampo(r.campoId); if(!c || c.tipo !== 'pk') return;
+    if(/inicio|desde/i.test(c.etiqueta)) ini = c.id; else if(/\bfin\b|hasta/i.test(c.etiqueta)) fin = c.id;
+  });
+  return {ini, fin};
+}
+function etqElem(e){
+  const p = elemPK(e), t = getTipo(e.tipoId) || {};
+  const pk = !isNaN(p.ini) && !isNaN(p.fin) ? 'PK ' + toPkMas(Math.min(p.ini, p.fin)) + '–' + toPkMas(Math.max(p.ini, p.fin)) : (!isNaN(p.pu) ? 'PK ' + toPkMas(p.pu) : 'sin PK');
+  return (e.codigo || t.nombre || 'elemento') + ' (' + pk + ')';
+}
+function analizarUnion(els){
+  const r = {tipos:[...new Set(els.map(e => e.tipoId))], noLin:[], huecos:[], solapes:[], difs:[], ini:NaN, fin:NaN, orden:[]};
+  r.noLin = els.filter(e => { const p = elemPK(e); return isNaN(p.ini) || isNaN(p.fin); });
+  const lin = els.filter(e => !r.noLin.includes(e));
+  const rg = e => { const p = elemPK(e); return [Math.min(p.ini, p.fin), Math.max(p.ini, p.fin)]; };
+  r.orden = lin.slice().sort((a, b) => rg(a)[0] - rg(b)[0] || rg(a)[1] - rg(b)[1]);
+  if(r.orden.length){
+    r.ini = Math.min(...r.orden.map(e => rg(e)[0])); r.fin = Math.max(...r.orden.map(e => rg(e)[1]));
+    let finAc = rg(r.orden[0])[1], ult = r.orden[0];
+    r.orden.slice(1).forEach(e => {
+      const [a, b] = rg(e);
+      if(a - finAc > UNI_JUNTA) r.huecos.push({a:ult, b:e, m:Math.round((a - finAc) * 1000)});
+      else if(finAc - a > UNI_JUNTA) r.solapes.push({a:ult, b:e, m:Math.round((Math.min(finAc, b) - a) * 1000)});
+      if(b >= finAc){ finAc = b; ult = e; }
+    });
+  }
+  if(r.tipos.length !== 1) return r;
+  const t = getTipo(r.tipos[0]); if(!t) return r;
+  const pkIF = pkCamposIF(t);
+  const cids = ['__codigo'].concat(t.campos.map(x => x.campoId).filter(cid => {
+    const c = getCampo(cid); return c && c.tipo !== 'pk' && cid !== pkIF.ini && cid !== pkIF.fin && !UNI_SUMA.includes(cid);
+  }));
+  const valDe = (e, cid) => vStr(cid === '__codigo' ? e.codigo : (e.valores || {})[cid]).trim();
+  cids.forEach(cid => {
+    const g = new Map();
+    els.forEach(e => { const v = valDe(e, cid); if(!g.has(v)) g.set(v, []); g.get(v).push(e); });
+    if(g.size < 2) return;
+    const grupos = [...g.entries()].map(([valor, es]) => ({valor, els:es})).sort((a, b) => b.els.length - a.els.length || (a.valor ? 0 : 1) - (b.valor ? 0 : 1));
+    const elegido = (grupos.find(x => x.valor) || grupos[0]).valor;
+    r.difs.push({cid, etq:cid === '__codigo' ? 'Código' : (getCampo(cid) || {}).etiqueta || cid, grupos, elegido});
+  });
+  return r;
+}
+function unificarModal(){
+  if(soloLectura()) return;
+  const els = selElementos();
+  if(els.length < 2){ alert('Marca al menos dos elementos para unificarlos.'); return; }
+  const r = analizarUnion(els);
+  const t = r.tipos.length === 1 ? getTipo(r.tipos[0]) : null;
+  const reabrir = () => setTimeout(unificarModal, 0);
+  const quitar = e => el('button', {class:'btn sm', title:'Quitarlo de la selección y volver a comprobar', onclick:() => { selElems.delete(e.id); selRefrescar(); reabrir(); closeModal(); }}, 'Quitar de la selección');
+  const abrir = e => el('button', {class:'btn sm', title:'Abrir su ficha para cambiarlo. Luego vuelve a pulsar «Unificar»: la selección se mantiene.', onclick:() => nuevoElemento(e.id)}, 'Abrir');
+  const fila = (txt, ...btns) => el('div', {class:'row', style:'flex-wrap:wrap;gap:6px'}, el('span', {class:'grow', style:'min-width:200px;white-space:normal;overflow:visible'}, txt), ...btns);
+  const body = el('div', null);
+  const bloqueo = [];
+  if(r.tipos.length !== 1){
+    bloqueo.push('tipos');
+    const porTipo = r.tipos.map(id => ({t:getTipo(id) || {nombre:'?'}, es:els.filter(e => e.tipoId === id)}));
+    const mayor = porTipo.slice().sort((a, b) => b.es.length - a.es.length)[0];
+    body.appendChild(el('div', {class:'flab', style:'color:var(--red)'}, 'Son de tipos distintos: no se pueden unificar'));
+    porTipo.filter(x => x !== mayor).forEach(x => x.es.forEach(e => body.appendChild(fila(etqElem(e) + ' es «' + x.t.nombre + '» y el resto «' + mayor.t.nombre + '»', quitar(e)))));
+  }
+  if(r.noLin.length){
+    bloqueo.push('lineales');
+    body.appendChild(el('div', {class:'flab', style:'color:var(--red);margin-top:10px'}, 'Sin PK inicio y PK fin: solo se unifican elementos lineales'));
+    r.noLin.forEach(e => body.appendChild(fila(etqElem(e), abrir(e), quitar(e))));
+  }
+  if(!bloqueo.length){
+    const L = Math.round((r.fin - r.ini) * 1000);
+    body.appendChild(el('div', {class:'note', style:'margin-bottom:10px'},
+      els.length + ' tramos de ' + (t ? t.nombre.toLowerCase() : 'elementos') + ' → uno del PK ' + toPkMas(r.ini) + ' al PK ' + toPkMas(r.fin) + ' (' + L.toLocaleString('es-ES') + ' m).'));
+  }
+  if(r.huecos.length || r.solapes.length){
+    body.appendChild(el('div', {class:'flab', style:'color:var(--amb);margin-top:10px'}, 'Continuidad'));
+    r.huecos.forEach(h => body.appendChild(fila('Hueco de ' + h.m + ' m entre ' + etqElem(h.a) + ' y ' + etqElem(h.b) + '. Si sigues, el unificado cubre también el hueco.', abrir(h.b), quitar(h.b))));
+    r.solapes.forEach(h => body.appendChild(fila(etqElem(h.b) + ' se solapa ' + h.m + ' m con ' + etqElem(h.a) + (h.m >= Math.round((elemPK(h.b).fin - elemPK(h.b).ini) * 1000) - 1 ? ' (¿repetido?)' : '') + '.', abrir(h.b), quitar(h.b))));
+  }
+  const elegir = {};
+  if(r.difs.length && !bloqueo.length){
+    body.appendChild(el('div', {class:'flab', style:'color:var(--amb);margin-top:10px'}, 'Campos que no coinciden'));
+    r.difs.forEach(d => {
+      const may = d.grupos[0];
+      const sel = el('select', {style:'width:auto;max-width:100%', onchange:ev => { elegir[d.cid] = ev.target.value; }},
+        ...d.grupos.map(g => el('option', {value:g.valor, ...(g.valor === d.elegido ? {selected:'selected'} : {})}, (g.valor || '(vacío)') + '  · ' + g.els.length)));
+      elegir[d.cid] = d.elegido;
+      const caja = el('div', {style:'border:1px solid var(--line2);border-radius:8px;padding:8px 10px;margin-bottom:8px'},
+        el('div', {style:'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px'}, el('b', null, d.etq), el('span', {class:'spacer'}),
+          el('span', {style:'font-size:12px;color:var(--tx3)'}, 'En el unificado:'), sel));
+      d.grupos.slice(1).forEach(g => g.els.forEach(e => caja.appendChild(fila(etqElem(e) + ' tiene «' + (g.valor || 'vacío') + '»; ' + (may.els.length > 1 ? 'los demás' : etqElem(may.els[0])) + ' «' + (may.valor || 'vacío') + '»',
+        d.cid === '__codigo' ? null : el('button', {class:'btn sm', title:'Cambiar este elemento a «' + (may.valor || 'vacío') + '» (queda en su historial)', onclick:() => {
+          edicionEnBloque([e.id], {[d.cid]:may.valor}, d.etq + ' → ' + (may.valor || '(vacío)') + ' (para unificar)'); closeModal(); render(); reabrir();
+        }}, 'Igualar a «' + (may.valor || 'vacío') + '»'),
+        abrir(e), quitar(e)))));
+      body.appendChild(caja);
+    });
+  }
+  if(!bloqueo.length && (r.huecos.length || r.solapes.length || r.difs.length))
+    body.appendChild(el('p', {class:'hint'}, '«Unificar» sigue igualmente con los valores elegidos. Cancelar no cambia nada, y tras unificar se puede deshacer con ↶.'));
+  else if(!bloqueo.length) body.appendChild(el('p', {class:'hint'}, 'Todo coincide. Queda el tramo de PK más bajo con el PK fin del último; los demás se dan de baja (se puede deshacer con ↶).'));
+  openModal('Unificar ' + els.length + ' elementos', body, () => {
+    if(bloqueo.length){ alert('Primero quita de la selección los elementos marcados en rojo.'); return false; }
+    unificar(r, elegir); return false;
+  }, null, 'Unificar');
+}
+function unificar(r, elegir){
+  const ts = Date.now(), els = r.orden, surv = els[0], t = getTipo(surv.tipoId); if(!t) return;
+  const pkIF = pkCamposIF(t);
+  histGuardar(surv, ts, 'unificación');
+  const nv = Object.assign({}, surv.valores);
+  if(pkIF.ini) nv[pkIF.ini] = toPkMas(r.ini);
+  if(pkIF.fin) nv[pkIF.fin] = toPkMas(r.fin);
+  let codigo = surv.codigo;
+  r.difs.forEach(d => { const v = d.cid in elegir ? elegir[d.cid] : d.elegido; if(d.cid === '__codigo') codigo = v; else nv[d.cid] = v; });
+  UNI_SUMA.forEach(cid => {
+    if(!t.campos.some(x => x.campoId === cid)) return;
+    const ns = els.map(e => numCampo((e.valores || {})[cid])).filter(n => isFinite(n));
+    if(ns.length) nv[cid] = String(Math.round(ns.reduce((a, b) => a + b, 0) * 1000) / 1000).replace('.', ',');
+  });
+  surv.valores = nv; surv.codigo = codigo; surv.modificado = ts;
+  const otros = els.slice(1);
+  otros.forEach(e => { e.borrado = ts; e.modificado = ts; });
+  /* los documentos vinculados a los que se van pasan al que queda */
+  const ids = new Set(otros.map(e => e.id));
+  docsProy(proyActivo()).forEach(d => { if(!d.elementos) return; Object.keys(d.elementos).forEach(id => {
+    if(!ids.has(id)) return; if(!d.elementos[surv.id]) d.elementos[surv.id] = d.elementos[id]; delete d.elementos[id];
+  }); });
+  registrarCambio('unificación', 'Unificados ' + els.length + ' tramos de ' + t.nombre.toLowerCase() + ' en uno: PK ' + toPkMas(r.ini) + '–' + toPkMas(r.fin) +
+    ' (' + els.map(e => e.codigo || '').filter(Boolean).slice(0, 8).join(', ') + ')', surv.id, els.map(e => e.id));
+  selElems.clear(); selElems.add(surv.id);
+  save(); closeModal(); render();
+  openModal('Unificado',
+    el('div', null,
+      el('p', null, 'Queda ' + etqElem(surv) + '. ' + otros.length + ' elemento' + (otros.length > 1 ? 's' : '') + ' dado' + (otros.length > 1 ? 's' : '') + ' de baja.'),
+      el('div', {style:'display:flex;gap:8px'},
+        el('button', {class:'btn sm', onclick:() => { closeModal(); deshacer(); }}, '↶ Deshacer'),
+        el('button', {class:'btn sm', onclick:() => { closeModal(); nuevoElemento(surv.id); }}, 'Abrir el unificado'))),
+    null);
+}
+
 /* ================= modal: alta / edición de elemento ================= */
 /* reduce una imagen (File) a dataURL JPEG, lado máx ~1400 px, para poder guardarla en el navegador */
 function reducirImagen(file, maxLado, q){
@@ -8732,7 +9077,8 @@ function nuevoElemento(id, prefill, tabIni){
         el('option', {value:'No', ...(val === 'No' ? {selected:'selected'} : {})}, 'No'));
       else if(c.tipo === 'number') input = el('input', {type:'number', value:val});
       else if(c.tipo === 'date') input = el('input', {type:'date', value:fechaISO(val) || val});
-      else if(c.tipo === 'pk') input = inPK({placeholder:'45+320', value:val});
+      /* también un campo de texto que se llame PK (creado a mano): teclado numérico en el móvil */
+      else if(c.tipo === 'pk' || (c.tipo === 'text' && /^p\.?k\.?\b/i.test(c.etiqueta || ''))) input = inPK({placeholder:'45+320', value:val});
       else if(c.tipo === 'photo'){ input = el('input', {type:'hidden', value:val}); extra = fotoWidget(input, ro); }
       else if(c.tipo === 'focos'){ input = el('input', {type:'hidden', value:val}); extra = focosWidget(input, ro); }
       else if(c.tipo === 'doc') input = el('input', {placeholder:'Nombre de archivo', value:val});
@@ -9263,7 +9609,7 @@ function descargar(nombre, contenido, mime){
 
 /* ================= modal genérico ================= */
 let modalEl = null;
-function openModal(titulo, bodyNode, onSave, onDelete){
+function openModal(titulo, bodyNode, onSave, onDelete, txtGuardar){
   closeModal();
   const btnDel = onDelete ? el('button', {class:'btn danger', onclick:() => { if(onDelete() !== false) closeModal(); }}, 'Borrar') : null;
   modalEl = el('div', {class:'overlay', onclick:e => { if(e.target === modalEl) closeModal(); }},
@@ -9273,7 +9619,7 @@ function openModal(titulo, bodyNode, onSave, onDelete){
       el('div', {class:'modal-f'},
         btnDel || el('span', null), el('span', {class:'spacer'}),
         el('button', {class:'btn', onclick:closeModal}, 'Cancelar'),
-        el('button', {class:'btn red', onclick:() => { if(!onSave || onSave() !== false) closeModal(); }}, 'Guardar')
+        el('button', {class:'btn red', onclick:() => { if(!onSave || onSave() !== false) closeModal(); }}, txtGuardar || 'Guardar')
       )
     )
   );
