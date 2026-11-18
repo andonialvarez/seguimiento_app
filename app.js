@@ -1216,7 +1216,8 @@ function toggleMenu(){
     el('button', {onclick:() => { closeMenu(); document.getElementById('file-import').click(); }}, 'Importar (.json)'),
     el('button', {onclick:() => { closeMenu(); configPatrones(); }}, 'Patrones de detección'),
     el('button', {onclick:() => { closeMenu(); modoActual() === 'diseno' ? dzVaciarProyecto() : vaciarProyecto(); }}, 'Vaciar proyecto actual…'),
-    el('button', {onclick:() => { closeMenu(); if(confirm('Borra TODO (proyectos, elementos y modelo). ¿Seguro?')){ localStorage.removeItem(KEY); location.reload(); } }}, 'Reiniciar todo')
+    el('button', {onclick:() => { closeMenu(); if(confirm('Borra TODO (proyectos, elementos y modelo). ¿Seguro?')){ localStorage.removeItem(KEY); location.reload(); } }}, 'Reiniciar todo'),
+    el('div', {style:'color:var(--tx3);font-size:10.5px;padding:6px 10px 2px'}, '© 2026 Andoni Álvarez')
   );
   document.getElementById('subbar').appendChild(m);
 }
