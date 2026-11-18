@@ -724,6 +724,7 @@ const getTipo  = id => state.elementTypes.find(t => t.id === id);
 const contarPorTipo = id => state.elementos.filter(e => e.tipoId === id).length;
 const proyActivo = () => state.proyectos.find(p => p.id === state.proyectoActivo) || state.proyectos[0];
 let fechaVista = null;   /* ms (fin del día) o null = hoy */
+let histTodos = false;   /* Historial con «TODOS» los proyectos (ver viewHistorial) */
 function estadoEnFecha(e, f){
   if(!e.hist || !e.hist.length) return {codigo:e.codigo, valores:e.valores, plano:e.plano};
   for(const h of e.hist){ if(h.ts > f) return h.snap; }
@@ -1175,15 +1176,20 @@ function renderSub(){
   sub.appendChild(dWrap);
 
   const prAct = proyActivo(), nArch = (state.archivados || []).length;
+  const enHistTodos = histTodos && currentView === 'historial' && modoActual() !== 'diseno';
   sub.appendChild(el('div', {class:'proj'},
     el('span', {class:'lab'}, modoActual() === 'diseno' ? 'Proyecto (diseño)' : 'Proyecto'),
-    el('select', {onchange:e => { state.proyectoActivo = e.target.value; save(); render(); }},
-      ...proyectosDelModo().map(p => el('option', {value:p.id, ...(p.id === state.proyectoActivo ? {selected:'selected'} : {})}, (p.finalizado ? '✓ ' : '') + p.nombre))),
+    el('select', {onchange:e => {
+        if(e.target.value === '__todos'){ histTodos = true; render(); return; }
+        histTodos = false; state.proyectoActivo = e.target.value; save(); render(); }},
+      ...(enHistTodos ? [el('option', {value:'__todos', selected:'selected'}, 'TODOS')]
+        : currentView === 'historial' && modoActual() !== 'diseno' ? [el('option', {value:'__todos'}, 'TODOS')] : []),
+      ...proyectosDelModo().map(p => el('option', {value:p.id, ...(!enHistTodos && p.id === state.proyectoActivo ? {selected:'selected'} : {})}, (p.finalizado ? '✓ ' : '') + p.nombre))),
     el('button', {class:'btn sm', onclick:() => nuevoProyectoModal()}, '+ Nuevo'),
-    prAct && !prAct.finalizado ? el('button', {class:'btn sm', title:'Dar por terminado este proyecto (queda en solo lectura y se puede archivar)', onclick:() => finalizarProyecto(prAct.id)}, 'Finalizar') : null,
+    prAct && !prAct.finalizado && !enHistTodos ? el('button', {class:'btn sm', title:'Dar por terminado este proyecto (queda en solo lectura y se puede archivar)', onclick:() => finalizarProyecto(prAct.id)}, 'Finalizar') : null,
     el('button', {class:'btn sm ghost', title:'Proyectos archivados', onclick:verArchivados}, 'Archivo' + (nArch ? ' (' + nArch + ')' : ''))
   ));
-  if(prAct && prAct.finalizado) sub.appendChild(el('div', {style:'width:100%;margin-top:8px;padding:6px 12px;background:var(--grnbg);color:var(--grn);border-radius:8px;font-size:12px;font-weight:600;display:flex;gap:10px;align-items:center;flex-wrap:wrap'},
+  if(prAct && prAct.finalizado && !enHistTodos) sub.appendChild(el('div', {style:'width:100%;margin-top:8px;padding:6px 12px;background:var(--grnbg);color:var(--grn);border-radius:8px;font-size:12px;font-weight:600;display:flex;gap:10px;align-items:center;flex-wrap:wrap'},
     el('span', null, 'Proyecto finalizado el ' + new Date(prAct.finalizado).toLocaleDateString('es-ES') + (modoActual() === 'diseno' ? '' : ' · solo lectura')),
     el('span', {class:'spacer'}),
     el('button', {class:'btn sm', onclick:() => archivarProyecto(prAct.id)}, 'Archivar…'),
@@ -4646,12 +4652,23 @@ function viewCertificaciones(){
 }
 
 /* ================= vista: Historial ================= */
+/* «TODOS» en el selector de proyecto (solo en esta vista): mezcla el historial de todos los
+   proyectos de seguimiento de este navegador en orden cronológico, cada fila con su proyecto.
+   Los archivados no entran: al archivar salen de este navegador y solo queda su ficha.
+   (histTodos se declara junto a fechaVista porque renderSub lo lee) */
 let histFiltro = '';
 function viewHistorial(){
   const c = el('div', null);
   const pr = proyActivo();
-  const h = (pr.historial || []).slice();
-  c.appendChild(el('div', {class:'sec-title'}, 'Historial de cambios', el('span', {class:'muted'}, pr.nombre + ' · ' + h.length + ' registros')));
+  const todos = histTodos;
+  const prs = todos ? proyectosDelModo('seguimiento') : [pr];
+  const h = [];
+  prs.forEach(p => (p.historial || []).forEach(x => h.push({...x, _p:p})));
+  h.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  const nArch = (state.archivados || []).length;
+  c.appendChild(el('div', {class:'sec-title'}, 'Historial de cambios', el('span', {class:'muted'},
+    (todos ? 'Todos los proyectos (' + prs.length + ')' : pr.nombre) + ' · ' + h.length + ' registros')));
+  if(todos && nArch) c.appendChild(el('p', {class:'hint'}, 'No incluye los ' + nArch + ' proyecto(s) archivado(s): para ver su historial, recupéralo desde «Archivo».'));
   if(!h.length){ c.appendChild(el('div', {class:'note'}, 'Todavía no hay cambios registrados. Se anotan las altas, ediciones, bajas e importaciones con su fecha y hora.')); return c; }
 
   const acciones = [...new Set(h.map(x => x.accion))];
@@ -4666,15 +4683,16 @@ function viewHistorial(){
   const claseAcc = a => /alta|import/i.test(a) ? 'green' : /baja/i.test(a) ? 'red' : /edic/i.test(a) ? 'amber' : 'gray';
   const wrap = el('div', {class:'tablewrap'});
   wrap.appendChild(el('table', null,
-    el('thead', null, el('tr', null, el('th', null, 'Fecha y hora'), el('th', null, 'Acción'), el('th', null, 'Detalle'), el('th', null, ''))),
+    el('thead', null, el('tr', null, el('th', null, 'Fecha y hora'), todos ? el('th', null, 'Proyecto') : null, el('th', null, 'Acción'), el('th', null, 'Detalle'), el('th', null, ''))),
     el('tbody', null, ...filas.slice(0, 500).map(x => el('tr', null,
       el('td', {style:'white-space:nowrap;color:var(--tx2)'}, new Date(x.ts).toLocaleString('es-ES')),
+      todos ? el('td', {style:'white-space:nowrap;font-weight:600'}, (x._p.finalizado ? '✓ ' : '') + x._p.nombre) : null,
       el('td', null, el('span', {class:'pill ' + claseAcc(x.accion)}, x.accion)),
       el('td', null, x.detalle || '—'),
       el('td', null, x.ref && state.elementos.some(e => e.id === x.ref && !e.borrado)
-        ? el('button', {class:'btn sm', onclick:() => nuevoElemento(x.ref)}, 'Abrir')
-        : (x.refs && x.refs.length && !soloVer()) ? el('button', {class:'btn sm', title:'Marcar estos elementos en la Base de datos', onclick:() => {
-            selVigente(); selElems.clear();
+        ? el('button', {class:'btn sm', onclick:() => { histIrA(x._p); nuevoElemento(x.ref); }}, 'Abrir')
+        : (x.refs && x.refs.length && !(fechaVista || x._p.finalizado)) ? el('button', {class:'btn sm', title:'Marcar estos elementos en la Base de datos', onclick:() => {
+            histIrA(x._p); selVigente(); selElems.clear();
             x.refs.forEach(id => { if(state.elementos.some(e => e.id === id && !e.borrado)) selElems.add(id); });
             if(!selElems.size){ alert('Esos elementos ya no existen.'); return; }
             setView('bd'); }}, 'Seleccionar (' + x.refs.length + ')') : null)
@@ -4683,6 +4701,11 @@ function viewHistorial(){
   c.appendChild(wrap);
   if(filas.length > 500) c.appendChild(el('p', {class:'hint'}, 'Mostrando los 500 más recientes.'));
   return c;
+}
+/* con «TODOS», abrir o seleccionar algo de otro proyecto pasa antes a ese proyecto */
+function histIrA(p){
+  if(!p || p.id === state.proyectoActivo) return;
+  state.proyectoActivo = p.id; save(); render();
 }
 
 /* ================= Certificaciones → Instalados (avance por fechas) ================= */
