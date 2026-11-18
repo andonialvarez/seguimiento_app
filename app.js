@@ -112,7 +112,8 @@ function nagDistA160(linea, cat, decl, vi){
 }
 /* distancia de proteccion frente a rebase indebido (m) para linea y declividad en ‰ (NAG apdo. 5) */
 function nagRebaseIndebido(linea, decl){
-  const dR = Math.max(-35, Math.min(35, Math.round(decl || 0)));
+  /* redondeo del lado seguro, como el resto (21-oct): la declividad hacia la peor, no a la más cercana */
+  const dR = Math.max(-35, Math.min(35, Math.floor((decl || 0) + 1e-9)));
   const arr = (nagEsRAM(linea) ? NAG_RI.ram : NAG_RI.cav).split(',');
   const val = arr[35 - dR];
   return (val == null || val === '') ? null : +val;
@@ -496,21 +497,47 @@ function migrar(){
      en el modelo de datos, todos los elementos desaparecían del esquema (ni «con PK» ni «sin PK»).
      Sin bandera: también corrige lo que llegue sincronizado desde un equipo con una versión vieja. */
   CAMPOS_PK.forEach(id => { const c = state.campos.find(x => x.id === id); if(c && c.tipo !== 'pk') c.tipo = 'pk'; });
+  /* el color de cada tipo va dentro de atributos del SVG del esquema: solo se admite #rgb/#rrggbb.
+     Un JSON importado o sincronizado con otra cosa podría colar atributos (onclick…) en la página */
+  state.elementTypes.forEach(t => { if(t && !/^#[0-9a-f]{6}$/i.test(t.color || '')) t.color = /^#[0-9a-f]{3}$/i.test(t.color || '') ? '#' + t.color.slice(1).split('').map(c => c + c).join('') : '#888888'; });
 }
 function load(){
-  try{ const raw = localStorage.getItem(KEY); state = raw ? JSON.parse(raw) : semilla(); }
-  catch(e){ state = semilla(); }
+  let raw = null;
+  try{ raw = localStorage.getItem(KEY); state = raw ? JSON.parse(raw) : semilla(); }
+  catch(e){
+    /* Lo guardado no se entiende (JSON roto). Antes se cambiaba por un proyecto vacío y el
+       arranque lo grababa encima: se perdía el original. Se aparta una copia (o se descarga si no
+       cabe) para poder recuperarlo, y se avisa. */
+    let copia = '';
+    if(raw){
+      try{ localStorage.setItem(KEY + '-corrupto', raw); copia = 'Se ha guardado una copia en este navegador (clave «' + KEY + '-corrupto»).'; }
+      catch(e2){ try{ descargar('via-datos-ilegibles_' + new Date().toISOString().slice(0, 10) + '.json', raw, 'application/json'); copia = 'Se ha descargado una copia del texto original.'; }catch(e3){} }
+    }
+    alert('Los datos guardados en este navegador no se pueden leer (' + e.message + '). La app arranca con un proyecto vacío. ' + copia);
+    state = semilla();
+  }
   migrar();
 }
-function persist(s){ try{ localStorage.setItem(KEY, s); }catch(e){ alert('No se pudo guardar: ' + e.message); } }
+/* devuelve si se ha podido guardar: con la cuota llena, el estado sigue solo en memoria */
+function persist(s){ try{ localStorage.setItem(KEY, s); return true; }catch(e){ alert('No se pudo guardar: ' + e.message + '\nLos cambios están solo en memoria: exporta el proyecto (Ajustes → Exportar JSON) antes de cerrar.'); return false; } }
 function save(){
   const snap = JSON.stringify(state);
   if(ultimoSnap !== null && ultimoSnap !== snap){ undoStack.push(ultimoSnap); if(undoStack.length > 60) undoStack.shift(); redoStack = []; }
   ultimoSnap = snap; persist(snap);
-  if(typeof GH !== 'undefined' && GH.on){ ghDirty = true; if(ghStatus !== 'conflict') setGhStatus('dirty'); clearTimeout(ghPushTimer); ghPushTimer = setTimeout(() => syncPush(), 3500); }
+  ghCambio();
 }
-function deshacer(){ if(!undoStack.length) return; redoStack.push(ultimoSnap); const s = undoStack.pop(); state = JSON.parse(s); ultimoSnap = s; persist(s); render(); }
-function rehacer(){ if(!redoStack.length) return; undoStack.push(ultimoSnap); const s = redoStack.pop(); state = JSON.parse(s); ultimoSnap = s; persist(s); render(); }
+/* deshacer y rehacer también son cambios que hay que subir */
+function deshacer(){ if(!undoStack.length) return; redoStack.push(ultimoSnap); const s = undoStack.pop(); state = JSON.parse(s); ultimoSnap = s; persist(s); ghCambio(); render(); }
+function rehacer(){ if(!redoStack.length) return; undoStack.push(ultimoSnap); const s = redoStack.pop(); state = JSON.parse(s); ultimoSnap = s; persist(s); ghCambio(); render(); }
+/* sustituir el estado entero (bajada de la nube, conflicto, importar JSON): se migra con vuelta
+   atrás si falla, y deshacer/rehacer empiezan de cero (no se puede volver a un estado ajeno). */
+function adoptarEstado(data){
+  const prev = state;
+  try{ state = data; migrar(); }catch(e){ state = prev; throw e; }
+  undoStack = []; redoStack = [];
+  ultimoSnap = JSON.stringify(state);
+  return persist(ultimoSnap);
+}
 
 /* ================= sincronización con GitHub ================= */
 const GH = {
@@ -528,7 +555,22 @@ const GH = {
   set lastSync(v){ localStorage.setItem('vs-gh-last', String(v || 0)); },
   get on(){ return !!this.token; }
 };
-let ghDirty = false, ghStatus = 'off', ghBusy = false, ghPushTimer = null;
+/* ghDirty se guarda en el dispositivo: si se recarga con cambios sin subir, la primera bajada no
+   los pisa (salta el conflicto). ghGen cuenta los cambios locales para saber si hubo alguno
+   mientras se subía o bajaba. ghConflicto bloquea las subidas automáticas hasta que se elija. */
+let ghDirty = localStorage.getItem('vs-gh-dirty') === '1', ghStatus = 'off', ghBusy = false, ghPushTimer = null, ghGen = 0, ghConflicto = false;
+function ghSetDirty(v){ ghDirty = v; try{ v ? localStorage.setItem('vs-gh-dirty', '1') : localStorage.removeItem('vs-gh-dirty'); }catch(e){} }
+function ghProgramarPush(ms){ clearTimeout(ghPushTimer); ghPushTimer = setTimeout(() => syncPush(), ms || 3500); }
+function ghCambio(){
+  if(typeof GH === 'undefined' || !GH.on) return;
+  ghGen++; ghSetDirty(true);
+  if(ghConflicto) return;   /* con un conflicto pendiente no se sube nada hasta que se elija */
+  setGhStatus('dirty'); ghProgramarPush();
+}
+function ghEntrarConflicto(res, silent){
+  ghConflicto = true; clearTimeout(ghPushTimer); setGhStatus('conflict');
+  if(!silent) mostrarConflicto(res);
+}
 function ghDevice(){ let d = localStorage.getItem('vs-gh-dev'); if(!d){ d = Math.random().toString(36).slice(2, 7); localStorage.setItem('vs-gh-dev', d); } return d; }
 function setGhStatus(s){ ghStatus = s; const tr = document.getElementById('topright'); if(tr) renderTopRight(); }
 function b64EncUtf8(str){ return btoa(unescape(encodeURIComponent(str))); }
@@ -538,12 +580,21 @@ function walkStrings(obj, fn){
   if(Array.isArray(obj)){ for(let i = 0; i < obj.length; i++){ const v = obj[i]; if(typeof v === 'string') obj[i] = fn(v); else if(v && typeof v === 'object') walkStrings(v, fn); } }
   else if(obj && typeof obj === 'object'){ for(const k in obj){ const v = obj[k]; if(typeof v === 'string') obj[k] = fn(v); else if(v && typeof v === 'object') walkStrings(v, fn); } }
 }
-function localTieneDatos(){ return (state.elementos && state.elementos.length > 0) || (state.proyectos && state.proyectos.length > 1); }
-async function ghApi(path, opts){
-  return fetch('https://api.github.com/repos/' + GH.repo + path, Object.assign({
-    headers: { 'Authorization': 'Bearer ' + GH.token, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
+/* ¿hay algo que perder si se adopta la nube sin preguntar? Un único proyecto de Diseño con vías,
+   agujas o generados, o documentos, lugares, vías del esquema o archivados, también cuenta. */
+function localTieneDatos(){
+  if((state.elementos && state.elementos.length > 0) || (state.proyectos && state.proyectos.length > 1) || (state.archivados || []).length) return true;
+  return (state.proyectos || []).some(p => (p.documentos || []).length || (p.lugares || []).length || (p.vias || []).length
+    || (p.diseno && Object.keys(p.diseno).some(k => Array.isArray(p.diseno[k]) && p.diseno[k].length)));
+}
+/* cfg {repo, token}: para probar otra conexión sin cambiar la configuración guardada */
+async function ghApi(path, opts, cfg){
+  const c = cfg || GH;
+  return fetch('https://api.github.com/repos/' + c.repo + path, Object.assign({
+    headers: { 'Authorization': 'Bearer ' + c.token, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
   }, opts || {}));
 }
+const ghDestino = () => GH.repo + '@' + GH.branch;
 /* contenido en base64 de una respuesta de /contents. Por encima de 1 MB GitHub NO lo incluye
    (content vacío, encoding "none"): entonces se pide el blob por su sha, que llega hasta 100 MB */
 async function ghContenidoB64(j){
@@ -579,24 +630,37 @@ async function ghRehidratarFotos(obj){
 async function syncPull(silent){
   if(!GH.on || ghBusy) return;
   ghBusy = true; setGhStatus('busy');
+  const gen0 = ghGen, dest = ghDestino();
   try{
     const res = await ghGetJson();
+    if(dest !== ghDestino()){ ghBusy = false; return; }   /* se cambió de repositorio mientras tanto */
     if(res.missing){ setGhStatus(localTieneDatos() ? 'dirty' : 'never'); ghBusy = false; return; }
-    GH.sha = res.sha;
     const remoteRev = +(res.data.__rev || 0);
-    if(remoteRev && remoteRev === GH.syncedRev){ setGhStatus(ghDirty ? 'dirty' : 'ok'); GH.lastSync = Date.now(); ghBusy = false; return; }
+    if(remoteRev && remoteRev === GH.syncedRev){
+      GH.sha = res.sha; GH.lastSync = Date.now(); ghBusy = false;
+      if(ghConflicto) setGhStatus('conflict');
+      else if(ghDirty){ setGhStatus('dirty'); ghProgramarPush(); }   /* cambios de antes de recargar */
+      else setGhStatus('ok');
+      return;
+    }
+    /* el SHA remoto NO se adopta si hay conflicto: con él, la siguiente subida automática
+       sobrescribiría la nube sin que nadie lo eligiera */
     const primeraVez = GH.syncedRev === 0;
-    if((ghDirty || (primeraVez && localTieneDatos())) && remoteRev !== GH.syncedRev){
-      ghBusy = false; setGhStatus('conflict');
-      if(!silent) mostrarConflicto(res);
+    if((ghDirty || ghConflicto || (primeraVez && localTieneDatos())) && remoteRev !== GH.syncedRev){
+      ghBusy = false; ghEntrarConflicto(res, silent);
       return;
     }
     await ghRehidratarFotos(res.data);
+    /* si se ha editado mientras bajaban las fotos, sustituir el estado perdería esa edición */
+    if(ghGen !== gen0){ ghBusy = false; ghEntrarConflicto(res, silent); return; }
+    if(dest !== ghDestino()){ ghBusy = false; return; }
     delete res.data.__rev; delete res.data.__device;
-    state = res.data; migrar();
-    ultimoSnap = JSON.stringify(state); persist(ultimoSnap);
-    GH.syncedRev = remoteRev; GH.lastSync = Date.now(); ghDirty = false;
-    setGhStatus('ok'); render();
+    const ok = adoptarEstado(res.data);
+    GH.sha = res.sha;
+    /* si no se pudo guardar en el dispositivo, no se da por sincronizado: al recargar se vuelve a bajar */
+    if(ok){ GH.syncedRev = remoteRev; GH.lastSync = Date.now(); }
+    ghSetDirty(false); ghConflicto = false;
+    setGhStatus(ok ? 'ok' : 'error'); render();
   }catch(e){
     setGhStatus(navigator.onLine ? 'error' : 'offline');
     if(!silent) alert('No se pudo sincronizar (bajar): ' + e.message);
@@ -617,9 +681,11 @@ async function ghSubirFotos(obj){
   }
 }
 async function syncPush(){
-  if(!GH.on || ghBusy) return;
+  if(!GH.on || ghConflicto) return;
+  if(ghBusy){ ghProgramarPush(); return; }   /* hay otra operación en curso: se reintenta, no se descarta */
   if(!navigator.onLine){ setGhStatus('offline'); return; }
   ghBusy = true; setGhStatus('busy');
+  const gen0 = ghGen, dest = ghDestino();
   try{
     const clone = JSON.parse(JSON.stringify(state));
     await ghSubirFotos(clone);
@@ -632,13 +698,15 @@ async function syncPush(){
     if(put.status === 409 || put.status === 422){
       const res = await ghGetJson();
       if(res.missing){ delete body.sha; put = await ghApi('/contents/proyecto.json', { method: 'PUT', body: JSON.stringify(body) }); }
-      else if(+(res.data.__rev || 0) !== GH.syncedRev){ ghBusy = false; setGhStatus('conflict'); mostrarConflicto(res); return; }
+      else if(+(res.data.__rev || 0) !== GH.syncedRev){ ghBusy = false; ghEntrarConflicto(res, false); return; }
       else { body.sha = res.sha; put = await ghApi('/contents/proyecto.json', { method: 'PUT', body: JSON.stringify(body) }); }
     }
     if(!put.ok) throw new Error('GitHub ' + put.status + ' ' + (await put.text()).slice(0, 160));
     const pj = await put.json();
-    GH.sha = pj.content.sha; GH.syncedRev = rev; GH.lastSync = Date.now(); ghDirty = false;
-    setGhStatus('ok');
+    if(dest === ghDestino()){ GH.sha = pj.content.sha; GH.syncedRev = rev; GH.lastSync = Date.now(); }
+    /* solo queda limpio si nadie ha tocado nada desde que se copió el estado; si no, otra subida */
+    if(ghGen === gen0 && dest === ghDestino()){ ghSetDirty(false); setGhStatus('ok'); }
+    else { setGhStatus('dirty'); ghProgramarPush(); }
   }catch(e){
     setGhStatus(navigator.onLine ? 'error' : 'offline');
     if(ghStatus === 'error') console.warn('sync push:', e);
@@ -660,16 +728,19 @@ function mostrarConflicto(res){
     f.innerHTML = '';
     f.appendChild(el('button', {class:'btn', onclick:async () => {
       closeModal(); ghBusy = true; setGhStatus('busy');
-      try{ await ghRehidratarFotos(res.data); delete res.data.__rev; delete res.data.__device;
-        state = res.data; migrar(); ultimoSnap = JSON.stringify(state); persist(ultimoSnap);
-        GH.sha = res.sha; GH.syncedRev = +(res.data.__rev || 0) || Date.now(); ghDirty = false;
-        setGhStatus('ok'); render();
+      try{ await ghRehidratarFotos(res.data);
+        const rev = +(res.data.__rev || 0);   /* se lee ANTES de quitarla del objeto */
+        delete res.data.__rev; delete res.data.__device;
+        const ok = adoptarEstado(res.data);
+        GH.sha = res.sha; if(ok){ GH.syncedRev = rev; GH.lastSync = Date.now(); }
+        ghSetDirty(false); ghConflicto = false;
+        setGhStatus(ok ? 'ok' : 'error'); render();
       }catch(e){ alert('Error: ' + e.message); }
       ghBusy = false;
     }}, 'Usar la de la nube'));
     f.appendChild(el('span', {class:'spacer'}));
     f.appendChild(el('button', {class:'btn red', onclick:async () => {
-      closeModal(); GH.sha = res.sha; GH.syncedRev = +(res.data.__rev || 0); ghDirty = true;
+      closeModal(); GH.sha = res.sha; GH.syncedRev = +(res.data.__rev || 0); ghSetDirty(true); ghConflicto = false;
       await syncPush();
     }}, 'Subir la de este dispositivo'));
   }
@@ -700,22 +771,48 @@ function configSync(){
       info,
       el('div', {style:'display:flex;gap:8px;flex-wrap:wrap;margin-top:6px'},
         el('button', {class:'btn sm', onclick:async () => {
-          GH.token = inTok.value; GH.repo = inRepo.value; GH.branch = inBranch.value;
-          try{ const r = await ghApi(''); if(r.ok){ alert('Conexión correcta con ' + GH.repo + '.'); } else { alert('No se pudo conectar: GitHub ' + r.status + '. Revisa el token y el repositorio.'); } }
-          catch(e){ alert('No se pudo conectar: ' + e.message); }
+          /* se prueba con la configuración escrita, sin guardarla: cancelar deja la anterior */
+          const r = await ghComprobarRepo(cfgEscrita());
+          if(r.error) alert('No se pudo conectar: ' + r.error);
+          else alert('Conexión correcta con ' + cfgEscrita().repo + '.' + (r.privado ? '' : '\n\nATENCIÓN: el repositorio es PÚBLICO. Los datos, fotos y documentos quedarían a la vista de cualquiera.'));
         }}, 'Probar conexión'),
         el('button', {class:'btn sm', onclick:async () => {
-          GH.token = inTok.value; GH.repo = inRepo.value; GH.branch = inBranch.value;
+          if(!(await ghGuardarConfig(cfgEscrita()))) return;
           closeModal(); await syncAhora();
         }}, 'Guardar y sincronizar ahora'),
         GH.on ? el('button', {class:'btn sm danger', onclick:() => {
           if(!confirm('Se desconectará este dispositivo (los datos locales se mantienen). ¿Seguir?')) return;
-          GH.token = ''; GH.sha = ''; GH.syncedRev = 0; ghDirty = false; setGhStatus('off'); closeModal();
+          clearTimeout(ghPushTimer);
+          GH.token = ''; GH.sha = ''; GH.syncedRev = 0; ghSetDirty(false); ghConflicto = false; setGhStatus('off'); closeModal();
         }}, 'Desconectar este dispositivo') : null
       )
     ),
-    () => { GH.token = inTok.value; GH.repo = inRepo.value; GH.branch = inBranch.value; if(GH.on && ghStatus === 'off') setGhStatus('dirty'); }
+    () => { ghGuardarConfig(cfgEscrita()).then(ok => { if(ok){ closeModal(); if(GH.on && ghStatus === 'off') setGhStatus(ghDirty ? 'dirty' : 'never'); } }); return false; }
   );
+  function cfgEscrita(){ return {token:inTok.value.trim(), repo:inRepo.value.trim() || 'andonialvarez/Seguimiento_obra', branch:inBranch.value.trim() || 'main'}; }
+}
+/* ¿se llega al repositorio y es privado? (para no subir los datos de obra a uno público) */
+async function ghComprobarRepo(cfg){
+  if(!cfg.token) return {error:'falta el token.'};
+  try{
+    const r = await ghApi('', null, cfg);
+    if(!r.ok) return {error:'GitHub ' + r.status + '. Revisa el token y el repositorio.'};
+    const j = await r.json();
+    return {privado:!!j.private};
+  }catch(e){ return {error:e.message}; }
+}
+/* guarda la configuración. Si cambia el repositorio o la rama, lo sincronizado con el anterior
+   (SHA, revisión) no vale para el nuevo: se empieza como primera sincronización, que pregunta
+   antes de pisar nada. Un repositorio público pide confirmación. */
+async function ghGuardarConfig(cfg){
+  const cambiaDestino = cfg.repo !== GH.repo || cfg.branch !== GH.branch;
+  if(cfg.token && (cambiaDestino || cfg.token !== GH.token)){
+    const r = await ghComprobarRepo(cfg);
+    if(!r.error && !r.privado && !confirm('El repositorio ' + cfg.repo + ' es PÚBLICO: los datos de obra, fotos y documentos quedarían a la vista de cualquiera.\n\n¿Guardar igualmente?')) return false;
+  }
+  if(cambiaDestino){ clearTimeout(ghPushTimer); GH.sha = ''; GH.syncedRev = 0; GH.lastSync = 0; ghConflicto = false; }
+  GH.token = cfg.token; GH.repo = cfg.repo; GH.branch = cfg.branch;
+  return true;
 }
 
 /* ================= helpers de modelo ================= */
@@ -775,12 +872,15 @@ function estadoBadgeClass(val){
 function pkNum(s){
   s = String(s == null ? '' : s).trim().replace(/^k?m\.?\s*/i, '').replace(/\s+/g, '');
   if(!s) return NaN;
-  /* tras el «+» van METROS: 5+35 son 35 m, no 350 */
-  let m = s.match(/^(\d+)\+(\d{1,3})$/);
-  if(m) return +m[1] + (+m[2].padStart(3, '0')) / 1000;
+  /* tras el «+» van METROS: 5+35 son 35 m, no 350. Admite signo: toPkMas escribe -0+350 */
+  let m = s.match(/^([-+]?)(\d+)\+(\d{1,3})$/);
+  if(m) return (m[1] === '-' ? -1 : 1) * (+m[2] + (+m[3].padStart(3, '0')) / 1000);
   /* con coma o punto es la parte decimal del km: 5,35 son 350 m */
-  m = s.match(/^(\d{1,4})[.,](\d{1,3})$/);
-  if(m) return +m[1] + (+m[2].padEnd(3, '0')) / 1000;
+  m = s.match(/^([-+]?)(\d{1,4})[.,](\d{1,3})$/);
+  if(m) return (m[1] === '-' ? -1 : 1) * (+m[2] + (+m[3].padEnd(3, '0')) / 1000);
+  /* el resto tiene que ser un número entero: «5+1000» o «12abc» no son un PK (parseFloat se
+     quedaba con el principio, 5 o 12, y el elemento se iba a otro sitio sin avisar) */
+  if(!/^[-+]?(\d+([.,]\d*)?|[.,]\d+)$/.test(s)) return NaN;
   const f = parseFloat(s.replace(',', '.'));
   if(!isFinite(f)) return NaN;
   /* un entero sin separador de cuatro cifras o más son metros: 5350 es el PK 5+350. Ninguna
@@ -1358,6 +1458,11 @@ async function archivarEjecutar(pr, descargarCopia, aviso){
       aviso('Preparando la copia descargable…');
       const pq = await archPaquete(pr, true);
       faltan = pq.faltan;
+      /* sin copia en el repositorio, el .json es la ÚNICA copia: si le faltan documentos se
+         pregunta ANTES de quitar el proyecto de la app, no después */
+      if(faltan.length && !enRepo && !confirm('Estos documentos no se pueden meter en la copia (su archivo no está en este dispositivo):\n· '
+          + faltan.join('\n· ') + '\n\nLa copia descargada será la única que quede y no los llevará. ¿Archivar igualmente?'))
+        throw new Error('cancelado: faltan documentos en la copia.');
       fichero = archNombreFichero(pr.nombre);
       descargar(fichero, JSON.stringify(pq), 'application/json');
     }
@@ -1382,15 +1487,35 @@ async function archRestaurar(pq){
   if(!pq || pq.formato !== ARCH_FORMATO || !pq.proyecto || !Array.isArray(pq.elementos)) throw new Error('el archivo no es un proyecto archivado de Vía.');
   const pr = pq.proyecto, id = pr.id;
   if(state.proyectos.some(p => p.id === id) && !confirm('«' + pr.nombre + '» ya está en la app. ¿Sustituirlo por la copia archivada?')) return false;
-  for(const h in (pq.archivos || {})){ try{ await docGuardarLocal(h, b64Blob(pq.archivos[h].b64, pq.archivos[h].mime)); }catch(e){} }
+  /* los archivos de los documentos, a este navegador. Si alguno falla (cuota, IndexedDB bloqueado)
+     se dice cuál y se pregunta: antes se callaba y el proyecto volvía con documentos que no abren */
+  const fallos = [];
+  for(const h in (pq.archivos || {})){
+    try{ await docGuardarLocal(h, b64Blob(pq.archivos[h].b64, pq.archivos[h].mime)); }
+    catch(e){ const d = (pr.documentos || []).find(x => x.archivo && x.archivo.hash === h); fallos.push((d ? d.nombre : h) + ' (' + (e && e.message || e) + ')'); }
+  }
+  if(fallos.length && !confirm('No se han podido guardar en este dispositivo ' + fallos.length + ' documento(s):\n· ' + fallos.join('\n· ')
+      + '\n\n¿Recuperar el proyecto igualmente? Esos documentos no se podrán abrir aquí' + (GH.on ? ' salvo que estén en el repositorio' : '')
+      + '. La copia archivada se conserva en la lista «Archivo».')) return false;
   const m = pq.modelo || {};
   (m.campos || []).forEach(c => { if(!state.campos.some(x => x.id === c.id)) state.campos.push(c); });
-  (m.elementTypes || []).forEach(t => { if(!state.elementTypes.some(x => x.id === t.id)) state.elementTypes.push(t); });
+  (m.elementTypes || []).forEach(t => {
+    const act = state.elementTypes.find(x => x.id === t.id);
+    if(!act){ state.elementTypes.push(t); return; }
+    /* el tipo sigue existiendo pero se le ha quitado un campo después de archivar: si los
+       elementos recuperados tienen valor en él, se vuelve a añadir al tipo (al final, no
+       obligatorio) para que esos valores se vean y salgan en el Excel */
+    (t.campos || []).forEach(r => {
+      if(act.campos.some(x => x.campoId === r.campoId) || !state.campos.some(c => c.id === r.campoId)) return;
+      const usado = pq.elementos.some(e => e.tipoId === t.id && e.valores && e.valores[r.campoId] != null && e.valores[r.campoId] !== '');
+      if(usado) act.campos.push({campoId:r.campoId, obligatorio:false});
+    });
+  });
   if(m.tiposLugar) state.tiposLugar = [...new Set(tiposLugar().concat(m.tiposLugar))];
   if(m.tiposDoc) state.tiposDoc = [...new Set(tiposDoc().concat(m.tiposDoc))];
   state.proyectos = state.proyectos.filter(p => p.id !== id).concat(pr);
   state.elementos = state.elementos.filter(e => e.proyectoId !== id).concat(pq.elementos);
-  state.archivados = (state.archivados || []).filter(a => a.id !== id);
+  if(!fallos.length) state.archivados = (state.archivados || []).filter(a => a.id !== id);
   state.modo = pr.modo === 'diseno' ? 'diseno' : 'seguimiento';
   state.proyectoActivo = id; fechaVista = null;
   currentView = state.modo === 'diseno' ? 'entrada' : 'resumen';
@@ -1833,14 +1958,17 @@ function dzGenerar(){
   const desliz = esAV ? (grad >= 0 ? 300 : (gAbs <= 10 ? 300 : gAbs <= 20 ? 350 : 420)) : 250;
   const retro = esAV ? 30 : 20, cvPunta = esAV ? 30 : 20;
   const sis = P.sistemas || 'ASFA';
+  /* tabla manual: solo filas con velocidad y distancia positivas (una distancia negativa ponía la
+     avanzada detrás de la entrada) */
   const dfr = (P.distFrenado || []).map(r => ({v:parseFloat(String(r.vel).replace(',', '.')), m:parseFloat(String(r.dist).replace(',', '.'))}))
-    .filter(r => isFinite(r.v) && isFinite(r.m)).sort((a, b) => a.v - b.v);
+    .filter(r => isFinite(r.v) && isFinite(r.m) && r.v > 0 && r.m > 0).sort((a, b) => a.v - b.v);
   /* distancia de frenado: override manual si el usuario rellenó la tabla; si no, NAG 0-8-5.0 con
      redondeo del lado seguro (declividad hacia la peor, velocidad al múltiplo de 5 superior). Si
      la declividad o la velocidad se salen de la tabla se toma la fila o columna más desfavorable
      que haya, que se queda corta, y se marca «fuera». Sin dato, null. */
   const frenado = v => {
-    if(dfr.length){ const h = dfr.find(r => r.v >= v); return {m:(h ? h.m : dfr[dfr.length - 1].m), src:'tabla manual'}; }
+    /* por encima de la última fila se usa esa fila, que se queda corta: sale marcada «revisar» */
+    if(dfr.length){ const h = dfr.find(r => r.v >= v); return h ? {m:h.m, src:'tabla manual'} : {m:dfr[dfr.length - 1].m, src:'tabla manual, fuera de tabla (velocidad mayor que la última fila)', fuera:true}; }
     const s = nagDistParadaSegura(P.linea, P.catAM, grad, v);
     if(s) return {m:s.m, src:'NAG 0-8-5.0', v:s.v, decl:s.decl};
     const n = nagDistParada(P.linea, P.catAM, grad, v);
@@ -2199,7 +2327,9 @@ function dzGenerar(){
         if(d160 != null){
           add("E''" + num, 'Señal preavanzada', {via:a.vo, est:a.est, pkNum:pkA - dir * d160 / 1000, _dir:dir,
             lado:dir === 1 ? 'Lado derecho (abajo)' : 'Lado izquierdo (arriba)',
-            criterio:'NAS 811 §6.2: preavanzada de E' + num + " a " + d160 + ' m de la avanzada — frenado de ' + vmax + ' a 160 km/h en declividad ' + (grad || 0) + '‰ (NAG 0-8-5.0, distancias completas)'});
+            criterio:'NAS 811 §6.2: preavanzada de E' + num + " a " + d160 + ' m de la avanzada — frenado de ' + vmax + ' a 160 km/h en declividad ' + (grad || 0) + '‰ (NAG 0-8-5.0, distancias completas)'
+              + (grad < -35 ? ' — declividad fuera de tabla (se ha tomado −35‰, se queda corta)' : ''),
+            revisar:grad < -35});
         } else usoPreavProv = true;
       }
     }
@@ -2273,10 +2403,22 @@ function dzGenerar(){
       const tipo = TIPO_EX[String(x.tipo || '').trim()] || 'Señal de entrada';
       const ya = gen.find(g => g.codigo === cod && g.est === est);
       if(ya){
-        const antes = ya.pk;
+        const antes = ya.pk, mov = Math.round(Math.abs(pkNum(antes) - pk) * 1000);
         ya.pk = toPkStr(pk); ya._dir = dir; ya.existente = true;
         ya.criterio = 'Señal EXISTENTE declarada en los datos de entrada: se respeta su PK ' + toPkStr(pk)
           + ' en vez del calculado (' + antes + ').';
+        /* lo que se calculó a partir de esta señal (su avanzada, sus CV) sigue anclado al PK
+           calculado: si se ha movido, se marca para revisar y se dice qué depende de ella */
+        if(isFinite(mov) && mov >= 1){
+          const num = (cod.match(/\d+/) || [''])[0];
+          const dep = /entrada/i.test(ya.tipo) && num
+            ? gen.filter(g => g !== ya && g.est === est && (g.codigo === "E'" + num || g.codigo === "E''" + num || g.codigo === 'CV E' + num || g.codigo === "CV E'" + num)).map(g => g.codigo)
+            : [];
+          ya.revisar = true;
+          dep.forEach(c => { const g = gen.find(x => x.codigo === c && x.est === est); if(g) g.revisar = true; });
+          notas.push('Señal existente ' + cod + (est ? ' (' + est + ')' : '') + ': está a ' + mov + ' m del PK calculado'
+            + (dep.length ? '; ' + dep.join(', ') + ' se calcularon con el PK calculado y no se han movido — revisar' : '') + '.');
+        }
       } else {
         add(cod, tipo, {via, est, pkNum:pk, _dir:dir, existente:true,
           lado:dir === 1 ? 'Lado derecho (abajo)' : 'Lado izquierdo (arriba)',
@@ -2713,7 +2855,7 @@ function dzGenerar(){
       const dnd = 'vía ' + k.split('|')[1] + (k.split('|')[0] ? ' (' + k.split('|')[0] + ')' : '');
       /* sólo interesa el hueco corto entre circuitos contiguos: los tramos largos sin CV
          son estacionamiento todavía sin repartir, no una zona muerta */
-      if(h > 3 && h <= 30) notas.push(dnd + ': zona muerta de ' + h + ' m entre ' + l[i - 1].g.codigo + ' y ' + l[i].g.codigo + ' — debe ser < 3 m (NAS 811 §6.3).');
+      if(h >= 3 && h <= 30) notas.push(dnd + ': zona muerta de ' + h + ' m entre ' + l[i - 1].g.codigo + ' y ' + l[i].g.codigo + ' — debe ser < 3 m (NAS 811 §6.3).');
       else if(h < -1) notas.push(dnd + ': ' + l[i - 1].g.codigo + ' y ' + l[i].g.codigo + ' se solapan ' + (-h) + ' m — revisar las fronteras.');
     }
   });
@@ -2800,7 +2942,9 @@ function dzGenerar(){
         const nT = Math.max(1, Math.ceil(L / 0.048));
         const paso = Math.max(6, Math.floor(L * 1000 / nT / 6) * 6) / 1000;
         const arq = [];
-        for(let k = 0; k <= nT + 1 && lo + k * paso <= hi + 1e-9; k++) arq.push(lo + k * paso);
+        /* hasta el final con el paso YA redondeado a 6 m: con el tope antiguo (nT + 1, calculado
+           con 48 m) el bucle acababa antes de llegar y el último tramo salía de cientos de metros */
+        for(let k = 0; lo + k * paso <= hi + 1e-9 && k < 100000; k++) arq.push(lo + k * paso);
         if(hi - arq[arq.length - 1] > 0.006) arq.push(hi);
         nArq = arq.length;
         arq.forEach((pk, i) => add('ARQ ' + (i + 1), 'Arqueta', {via:vgc.num, est:'', pkNum:pk,
@@ -2826,9 +2970,11 @@ function dzGenerar(){
      La vía general acota TODO lo generado. Sin esta guarda salían pedales en PK negativo y
      preavanzadas más allá del final de línea, que no existen físicamente. */
   {
-    const vg = vias.find(v => v.general && isFinite(v.a) && isFinite(v.b));
-    if(vg){
-      const lo = Math.min(vg.a, vg.b), hi = Math.max(vg.a, vg.b);
+    /* con varias vías generales (vía doble), el tramo que cubren entre todas: con solo la primera
+       se quitaban elementos de una general 2 más larga */
+    const vgs = vias.filter(v => v.general && isFinite(v.a) && isFinite(v.b));
+    if(vgs.length){
+      const lo = Math.min(...vgs.map(v => Math.min(v.a, v.b))), hi = Math.max(...vgs.map(v => Math.max(v.a, v.b)));
       const quitados = [], recortados = [];
       const dentro = x => x >= lo - 1e-9 && x <= hi + 1e-9;
       const sobreviven = gen.filter(g => {
@@ -2916,10 +3062,11 @@ async function dzExportGenerados(){
     if(r.tipo && r.tipo.campos.some(x => x.campoId === 'f_estado')) r.valores.f_estado = 'Pendiente';
     (porTipo[r.tipoId] = porTipo[r.tipoId] || []).push(r);
   });
+  const hojasT = hojasTipos();
   state.elementTypes.forEach(t => {
     const filas = porTipo[t.id]; if(!filas || !filas.length) return;
     const campos = t.campos.map(r => getCampo(r.campoId)).filter(campoExportable);
-    const ws = wb.addWorksheet(nombreHoja(t.nombre));
+    const ws = wb.addWorksheet(hojasT[t.id]);
     ws.columns = [{header:'Código', key:'codigo', width:16},
       ...campos.map(c => ({header:c.etiqueta + (t.campos.find(r => r.campoId === c.id).obligatorio ? ' *' : ''), key:c.id, width:22}))];
     ws.getRow(1).font = {bold:true};
@@ -3837,7 +3984,10 @@ function dzValoresSeg(g, d){
   if(g.lado) val.f_lado = g.lado;
   if(m[2]) Object.assign(val, m[2]);
   if(m[0] === 't_bal' && g.senal && d){
-    const pg = pkNum(g.pk), ps = pkNum(((d.generados || []).find(x => x.codigo === g.senal) || {}).pk);
+    /* la señal de SU estación: el código solo es único dentro de una estación (E2 en cada una) */
+    const gs = (d.generados || []).find(x => x.codigo === g.senal && (x.est || '') === (g.est || ''))
+            || (d.generados || []).find(x => x.codigo === g.senal);
+    const pg = pkNum(g.pk), ps = pkNum((gs || {}).pk);
     if(isFinite(pg) && isFinite(ps)) val.f_distsen = String(Math.round(Math.abs(pg - ps) * 1000));
   }
   val.f_obs = (g.criterio || '') + (g.revisar ? ' [REVISAR]' : '');
@@ -3849,7 +3999,7 @@ function dzEnviarASeguimiento(){
   const srcId = (proyActivo() || {}).id;
   const segs = proyectosDelModo('seguimiento');
   const sel = el('select', null,
-    ...segs.map(p => el('option', {value:p.id}, p.nombre)),
+    ...segs.map(p => el('option', {value:p.id}, p.nombre + (p.finalizado ? ' (finalizado)' : ''))),
     el('option', {value:'__nuevo'}, '➕ Nuevo proyecto de seguimiento'));
   const inN = el('input', {placeholder:'Nombre del nuevo proyecto', style:'margin-top:8px;display:' + (segs.length ? 'none' : 'block')});
   if(!segs.length) sel.value = '__nuevo';
@@ -3877,6 +4027,7 @@ function dzEnviarASeguimiento(){
         state.proyectos.push({id:pid, nombre:nm, creado:Date.now(), pdf:'', historial:[], modo:'seguimiento', vias:[], lugares:[], andenes:[]});
       }
       const pr = state.proyectos.find(p => p.id === pid);
+      if(pr && pr.finalizado){ alert('«' + pr.nombre + '» está finalizado (solo lectura). Reábrelo antes o elige otro proyecto.'); return false; }
       const modoDup = selDup.value;
       let nBorr = 0;
       if(modoDup === 'reset'){
@@ -4104,7 +4255,7 @@ function viewEsquemaDiseno(){
   const topGrid = midY - arriba.length * rowH - 30;
   const tri = (x, y, up, col) => '<path d="M' + x + ' ' + (y + (up ? 7 : -7)) + ' L' + (x + 7) + ' ' + (y + (up ? -6 : 6)) + ' L' + (x - 7) + ' ' + (y + (up ? -6 : 6)) + ' Z" fill="' + col + '"/>';
   const G = (title, inner) => '<g><title>' + esc(title) + '</title>' + inner + '</g>';
-  const Gid = (gid, title, inner) => '<g data-gid="' + gid + '"' + (dzEsqEdit ? ' style="cursor:grab"' : '') + '><title>' + esc(title) + '</title>' + inner + '</g>';
+  const Gid = (gid, title, inner) => '<g data-gid="' + esc(gid) + '"' + (dzEsqEdit ? ' style="cursor:grab"' : '') + '><title>' + esc(title) + '</title>' + inner + '</g>';
   const pkT = pk => isFinite(pk) ? toPkStr(pk).replace(',', '+') : '—';
   let s = '<svg width="' + W + '" height="' + H + '" font-family="inherit">';
   /* rejilla vertical */
@@ -5171,7 +5322,7 @@ function cargarPdfActivo(){
 }
 function destinoProyectoModal(nombrePdf, cb){
   const sel = el('select', null,
-    ...state.proyectos.map(p => el('option', {value:p.id, ...(p.id === state.proyectoActivo ? {selected:'selected'} : {})}, p.nombre)),
+    ...state.proyectos.map(p => el('option', {value:p.id, ...(p.id === state.proyectoActivo ? {selected:'selected'} : {})}, p.nombre + (p.finalizado ? ' (finalizado)' : ''))),
     el('option', {value:'__new'}, '＋ Nuevo proyecto…'));
   const inN = el('input', {placeholder:'Nombre del nuevo proyecto', style:'display:none'});
   sel.addEventListener('change', () => { inN.style.display = sel.value === '__new' ? '' : 'none'; });
@@ -5185,7 +5336,12 @@ function destinoProyectoModal(nombrePdf, cb){
       if(sel.value === '__new'){
         const n = inN.value.trim(); if(!n){ alert('Pon un nombre para el nuevo proyecto.'); return false; }
         const id = uid(); state.proyectos.push({id, nombre:n, creado:Date.now(), pdf:''}); save(); cb(id);
-      } else cb(sel.value);
+      } else {
+        /* un proyecto finalizado es de solo lectura: no se le importa nada sin reabrirlo antes */
+        const pd = state.proyectos.find(p => p.id === sel.value);
+        if(pd && pd.finalizado){ alert('«' + pd.nombre + '» está finalizado (solo lectura). Reábrelo antes o elige otro proyecto.'); return false; }
+        cb(sel.value);
+      }
     });
 }
 function renderPdf(){
@@ -7041,7 +7197,7 @@ function esquemaCanvas(conPk, sinPk, elsAll){
                  '<line x1="' + (x - 3).toFixed(1) + '" y1="' + yBot + '" x2="' + (x + 3).toFixed(1) + '" y2="' + yBot + '" stroke="' + col + '" stroke-width="2.5"/>';
     const dots = ys.map(y => '<circle cx="' + x.toFixed(1) + '" cy="' + y + '" r="2.6" fill="' + col + '"/>').join('');
     const lab = esc((d.e.codigo || '') + (vs.length > 1 ? ' (' + vs.join('–') + ')' : '') + (isFinite(lng) && lng > 0 ? ' · ' + lng + ' m' : ''));
-    s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) + body + caps + dots +
+    s += '<g data-el="' + esc(d.e.id) + '" style="cursor:grab">' + ttl(d.e) + body + caps + dots +
       '<text x="' + x.toFixed(1) + '" y="' + (yTop - 4) + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' + lab + '</text></g>';
   });
 
@@ -7112,7 +7268,7 @@ function esquemaCanvas(conPk, sinPk, elsAll){
         const etq = (d.e.codigo || '') + (bd && bd.hijos.length ? ' · ' + bd.hijos.length + ' cable' + (bd.hijos.length > 1 ? 's' : '') : '');
         if(bd){
           const yT = top, yB = top + h, f = n => n.toFixed(1);
-          s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
+          s += '<g data-el="' + esc(d.e.id) + '" style="cursor:grab">' + ttl(d.e) +
             '<rect x="' + f(xa) + '" y="' + f(yT) + '" width="' + f(xb - xa) + '" height="' + f(h) + '" fill="' + col + '1e" stroke="none"/>' +
             '<path d="M' + f(xa) + ' ' + f(yT) + ' L' + f(xb) + ' ' + f(yT) + ' M' + f(xa) + ' ' + f(yB) + ' L' + f(xb) + ' ' + f(yB) +
               (pegIni ? '' : ' M' + f(xa) + ' ' + f(yT) + ' L' + f(xa) + ' ' + f(yB)) +
@@ -7129,7 +7285,7 @@ function esquemaCanvas(conPk, sinPk, elsAll){
         } else {
           const y = entre ? (top + h / 2) : (dir < 0 ? (top + h) : top);
           const ty = (!entre && dir < 0) ? (y - 5) : (y + 12);
-          s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
+          s += '<g data-el="' + esc(d.e.id) + '" style="cursor:grab">' + ttl(d.e) +
             '<line x1="' + xa.toFixed(1) + '" y1="' + y.toFixed(1) + '" x2="' + xb.toFixed(1) + '" y2="' + y.toFixed(1) + '" stroke="' + col + '" stroke-width="3" stroke-linecap="' + (pegIni || pegFin ? 'butt' : 'round') + '"/>' +
             (pegIni ? '' : '<line x1="' + xa.toFixed(1) + '" y1="' + (y - 4).toFixed(1) + '" x2="' + xa.toFixed(1) + '" y2="' + (y + 4).toFixed(1) + '" stroke="' + col + '" stroke-width="1.5"/>') +
             (pegFin ? '' : '<line x1="' + xb.toFixed(1) + '" y1="' + (y - 4).toFixed(1) + '" x2="' + xb.toFixed(1) + '" y2="' + (y + 4).toFixed(1) + '" stroke="' + col + '" stroke-width="1.5"/>') +
@@ -7155,7 +7311,7 @@ function esquemaCanvas(conPk, sinPk, elsAll){
     const cy = an ? (an.yInner + an.dir * (14 + Math.abs(stack)))
                   : (v2 ? (y0 + stack) : dir > 0 ? (y0 + 13 + stack) : (dir < 0 ? (y0 - 13 + stack) : (y0 - 11 + stack)));
     const ty = ((an ? an.dir : dir) > 0) ? (cy + 15) : (cy - 9);
-    s += '<g data-el="' + d.e.id + '" style="cursor:grab">' + ttl(d.e) +
+    s += '<g data-el="' + esc(d.e.id) + '" style="cursor:grab">' + ttl(d.e) +
       (esAg ? tri(x, cy + 6) : '<circle cx="' + x.toFixed(1) + '" cy="' + cy + '" r="5" fill="' + col + '" stroke="#0a0f16" stroke-width="1.5"/>') +
       '<text x="' + x.toFixed(1) + '" y="' + ty + '" fill="#8ea1b1" font-size="9" text-anchor="middle">' + esc(d.e.codigo || '') + '</text></g>';
   });
@@ -8235,7 +8391,9 @@ async function docObtener(d){
   marcarSubido(a.hash);
   return blob;
 }
-const docVisible = mime => /^(application\/pdf|image\/|text\/)/.test(mime || '');
+/* se abren en una pestaña solo los formatos pasivos. HTML, XHTML y SVG pueden llevar scripts y,
+   abiertos desde un blob de la app, correrían con acceso a sus datos (y al token): se descargan */
+const docVisible = mime => /^(application\/pdf|image\/(png|jpe?g|gif|webp|bmp)|text\/(plain|csv))\b/i.test(mime || '');
 async function docAbrir(d, descargarlo){
   if(!d.archivo){ if(d.enlace) window.open(d.enlace, '_blank', 'noopener'); return; }
   const verAqui = !descargarlo && docVisible(d.archivo.mime);
@@ -9343,15 +9501,28 @@ function exportCSV(){
 }
 /* nombre de hoja Excel válido: máx 31 car., sin \/*?:[] */
 function nombreHoja(s){ return String(s || 'Hoja').replace(/[\\/*?:[\]]/g, ' ').trim().slice(0, 31) || 'Hoja'; }
+/* nombre de hoja de cada tipo, sin repetir: dos tipos «A/B» y «A?B», o nombres que coinciden en
+   los 31 primeros caracteres, daban la misma hoja y Excel no admite dos iguales (la exportación
+   fallaba). Tampoco puede llamarse como las hojas auxiliares. Sin choques, el nombre de siempre. */
+const HOJAS_AUX = ['lugares', 'documentos', 'vias esquema', 'criterios de diseño', 'parametros', 'distfrenado', 'guía', 'cableado', 'medición', 'cajas'];
+function hojasTipos(){
+  const usadas = new Set(HOJAS_AUX), m = {};
+  state.elementTypes.forEach(t => {
+    const base = nombreHoja(t.nombre); let n = base, i = 2;
+    while(usadas.has(n.toLowerCase())){ const suf = ' (' + (i++) + ')'; n = base.slice(0, 31 - suf.length) + suf; }
+    usadas.add(n.toLowerCase()); m[t.id] = n;
+  });
+  return m;
+}
 function campoExportable(c){ return c && c.tipo !== 'photo' && c.tipo !== 'doc'; }
 async function exportXLSX(){
   if(typeof ExcelJS === 'undefined'){ alert('No se pudo cargar la librería de Excel (sin conexión). Prueba "Exportar CSV".'); return; }
   const wb = new ExcelJS.Workbook();
   wb.creator = 'Vía · Seguimiento';
-  const base = elementosProy();
+  const base = elementosProy(), hojasT = hojasTipos();
   state.elementTypes.forEach(t => {
     const campos = t.campos.map(r => getCampo(r.campoId)).filter(campoExportable);
-    const ws = wb.addWorksheet(nombreHoja(t.nombre));
+    const ws = wb.addWorksheet(hojasT[t.id]);
     /* «*» solo en los obligatorios siempre (la segunda vía solo lo es si Lado = Entrevías) */
     ws.columns = [{header:'Código', key:'codigo', width:16}, ...campos.map(c => { const ref = t.campos.find(r => r.campoId === c.id);
       return {header:c.etiqueta + (ref.obligatorio && !(ref.regla && ref.regla.conds && ref.regla.conds.length) ? ' *' : ''), key:c.id, width:22}; })];
@@ -9383,6 +9554,20 @@ async function exportXLSX(){
     wl.columns = [{header:'Nombre', key:'n', width:24}, {header:'Tipo', key:'t', width:16}, {header:'PK inicio', key:'a', width:14}, {header:'PK fin', key:'b', width:14}];
     wl.getRow(1).font = {bold:true};
     lugs.slice().sort((a, b) => a.pkIni - b.pkIni).forEach(l => wl.addRow({n:l.nombre, t:l.tipo || 'Estación', a:toPkStr(l.pkIni), b:toPkStr(l.pkFin)}));
+  }
+  /* vías del esquema, con las mismas columnas que la hoja de Diseño: el importador las lee y, sin
+     ellas, una ida y vuelta por Excel perdía de qué vía sale cada una y las toperas */
+  const vsq = proyActivo().vias || [];
+  if(vsq.length){
+    const wv = wb.addWorksheet('Vias esquema');
+    wv.columns = [{header:'Nº vía', key:'num', width:10}, {header:'Tipo', key:'tipo', width:14},
+      {header:'Sale de la vía', key:'padre', width:16}, {header:'Lugar', key:'lugar', width:20},
+      {header:'PK inicio', key:'a', width:14}, {header:'PK fin', key:'b', width:14},
+      {header:'Extremo conectado', key:'con', width:20}];
+    wv.getRow(1).font = {bold:true};
+    const nomLug = id => (lugs.find(l => l.id === id) || {}).nombre || '';
+    vsq.filter(v => isFinite(+v.pkIni) && isFinite(+v.pkFin)).forEach(v => wv.addRow({num:v.num, tipo:v.tipo || 'secundaria', padre:v.padre || '', lugar:nomLug(v.lugar),
+      a:toPkStr(+v.pkIni), b:toPkStr(+v.pkFin), con:v.ladoCon === 'fin' ? 'PK fin' : 'PK inicio'}));
   }
   /* documentos y a qué elementos están vinculados (el archivo no va en el Excel) */
   const docs = docsProy();
@@ -9417,14 +9602,17 @@ async function importarXLSXFile(file){
     const filas = [];
     let fechasMal = 0, fechasViejas = 0;
     const crudo = v => (v && typeof v === 'object' && !(v instanceof Date) && v.result != null) ? v.result : v;
+    const hojasT = hojasTipos();
     state.elementTypes.forEach(t => {
-      const ws = wb.worksheets.find(w => w.name === nombreHoja(t.nombre)); if(!ws) return;
+      const ws = wb.worksheets.find(w => w.name === hojasT[t.id]); if(!ws) return;
       const campos = t.campos.map(r => getCampo(r.campoId)).filter(campoExportable);
       const header = ws.getRow(1).values; /* array 1-indexed, [empty,'Código',...] */
-      const colFor = {};
+      const colFor = {}, usados = new Set();
       for(let i = 2; i <= header.length; i++){
         const h = celTexto(header[i]).replace(/\s*\*$/, '').trim();
-        const c = campos.find(cc => cc.etiqueta === h); if(c) colFor[i] = c.id;
+        /* dos campos con la misma etiqueta: la 2ª columna va al 2º campo (mismo orden que al
+           exportar), no otra vez al 1º pisando su valor */
+        const c = campos.find(cc => cc.etiqueta === h && !usados.has(cc.id)); if(c){ colFor[i] = c.id; usados.add(c.id); }
       }
       for(let r = 2; r <= ws.rowCount; r++){
         const row = ws.getRow(r);
@@ -9545,8 +9733,9 @@ async function importarXLSXFile(file){
         const num = g('nº vía') || g('no via') || g('nº via'), a = pkNum(g('pk inicio')), b = pkNum(g('pk fin'));
         if(!num || !isFinite(a) || !isFinite(b)) continue;
         const lug = idLug(g('lugar'));
-        const rec = {num, padre:g('sale de la vía') || g('sale de la via') || '1', lugar:lug,
-          tipo:/topera/i.test(g('tipo')) ? 'topera' : 'secundaria',
+        const esGenV = /^general$/i.test(g('tipo'));
+        const rec = {num, padre:esGenV ? '' : (g('sale de la vía') || g('sale de la via') || '1'), lugar:lug,
+          tipo:/topera/i.test(g('tipo')) ? 'topera' : (esGenV ? 'general' : 'secundaria'),
           pkIni:Math.min(a, b), pkFin:Math.max(a, b),
           ladoCon:/fin/i.test(g('extremo conectado')) ? 'fin' : 'ini'};
         const ya = prDest.vias.find(x => String(x.num) === num && (x.lugar || 'general') === lug);
@@ -9636,10 +9825,14 @@ document.getElementById('file-import').addEventListener('change', e => {
   r.onload = () => {
     try{
       const data = JSON.parse(String(r.result));
-      if(!data.campos || !data.elementTypes) throw new Error('El archivo no es un proyecto de Vía · Seguimiento');
+      const arr = k => data[k] == null || Array.isArray(data[k]);
+      if(!data || !Array.isArray(data.campos) || !Array.isArray(data.elementTypes) || !arr('elementos') || !arr('proyectos')
+        || data.elementTypes.some(t => !t || !Array.isArray(t.campos)))
+        throw new Error('El archivo no es un proyecto de Vía · Seguimiento');
       if(!confirm('Esto reemplazará todos los datos actuales. ¿Continuar?')) return;
-      state = data; migrar(); selTipoId = state.elementTypes[0] ? state.elementTypes[0].id : null;
-      ultimoSnap = JSON.stringify(state); persist(ultimoSnap); render();
+      /* si la migración falla, el estado anterior sigue intacto */
+      adoptarEstado(data); selTipoId = state.elementTypes[0] ? state.elementTypes[0].id : null;
+      ghCambio(); render();
     }catch(err){ alert('No se pudo importar: ' + err.message); }
   };
   r.readAsText(f); inp.value = '';
@@ -9677,6 +9870,6 @@ load();
 ultimoSnap = JSON.stringify(state);
 persist(ultimoSnap);
 setView('resumen');
-if(GH.on){ setGhStatus(GH.syncedRev ? 'ok' : 'never'); syncPull(true); }
-window.addEventListener('online', () => { if(GH.on){ setGhStatus('dirty'); if(ghDirty) syncPush(); else syncPull(true); } });
+if(GH.on){ setGhStatus(ghDirty ? 'dirty' : (GH.syncedRev ? 'ok' : 'never')); syncPull(true); }
+window.addEventListener('online', () => { if(!GH.on) return; if(ghConflicto){ setGhStatus('conflict'); return; } setGhStatus('dirty'); if(ghDirty) syncPush(); else syncPull(true); });
 window.addEventListener('offline', () => { if(GH.on) setGhStatus('offline'); });
