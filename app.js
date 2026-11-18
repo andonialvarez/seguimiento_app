@@ -6,8 +6,11 @@
 
 /* ================= utilidades ================= */
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2) + Date.now().toString(36));
+/* fecha más antigua que se admite en cualquier campo de fecha (calendario, a mano o desde Excel) */
+const FECHA_MIN = '2000-01-01';
 function el(tag, props, ...kids){
   const n = document.createElement(tag);
+  if(tag === 'input' && props && props.type === 'date' && props.min == null) n.setAttribute('min', FECHA_MIN);
   if(props) for(const k in props){
     if(k === 'class') n.className = props[k];
     else if(k === 'html') n.innerHTML = props[k];
@@ -19,6 +22,22 @@ function el(tag, props, ...kids){
 }
 const clone = o => JSON.parse(JSON.stringify(o));
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+/* Fechas anteriores a FECHA_MIN escritas a mano: el cambio no llega a la app (se corta en captura) y,
+   si al salir del campo sigue mal, vuelve al valor que tenía. Así se puede teclear el año dígito a dígito. */
+const fechaBaja = (/** @type {any} */ t) => t instanceof HTMLInputElement && t.type === 'date' && !!t.value && t.value < (t.min || FECHA_MIN);
+['input', 'change'].forEach(ev => document.addEventListener(ev, e => {
+  const t = /** @type {HTMLInputElement} */ (e.target);
+  if(fechaBaja(t)){ e.stopImmediatePropagation(); t.setCustomValidity('La fecha no puede ser anterior al 01/01/2000.'); }
+  else if(t instanceof HTMLInputElement && t.type === 'date') t.setCustomValidity('');
+}, true));
+document.addEventListener('focusout', e => {
+  const t = /** @type {HTMLInputElement} */ (e.target);
+  if(!fechaBaja(t)) return;
+  const prev = t.defaultValue && t.defaultValue >= (t.min || FECHA_MIN) ? t.defaultValue : '';
+  t.value = prev; t.setCustomValidity('');
+  t.dispatchEvent(new Event('change', {bubbles:true}));
+  alert('La fecha no puede ser anterior al 01/01/2000. Se deja ' + (prev ? 'la que tenía.' : 'vacía.'));
+}, true);
 
 /* ================= NAG 0-8-5.0 «Distancias de Frenado y Señales» (ED1+M1+M2, dic 2025) ================= */
 /* Distancia de frenado de servicio HASTA PARADA (m), por red x declividad(‰) x velocidad inicial(km/h).
@@ -9372,7 +9391,7 @@ async function importarXLSXFile(file){
     try{ await wb.xlsx.load(buf); }catch(err){ alert('No se pudo leer el Excel: ' + err.message); return; }
     /* 1) leer todas las filas */
     const filas = [];
-    let fechasMal = 0;
+    let fechasMal = 0, fechasViejas = 0;
     const crudo = v => (v && typeof v === 'object' && !(v instanceof Date) && v.result != null) ? v.result : v;
     state.elementTypes.forEach(t => {
       const ws = wb.worksheets.find(w => w.name === nombreHoja(t.nombre)); if(!ws) return;
@@ -9391,7 +9410,7 @@ async function importarXLSXFile(file){
           const cid = colFor[i], cell = row.getCell(+i).value;
           let v = celTexto(cell).trim(); if(!v) return;
           /* fechas: se guardan siempre como AAAA-MM-DD, vengan como vengan */
-          if((getCampo(cid) || {}).tipo === 'date'){ const f = fechaISO(crudo(cell)) || fechaISO(v); if(f) v = f; else fechasMal++; }
+          if((getCampo(cid) || {}).tipo === 'date'){ const f = fechaISO(crudo(cell)) || fechaISO(v); if(f && f < FECHA_MIN){ fechasViejas++; return; } if(f) v = f; else fechasMal++; }
           valores[cid] = v; algo = true;
         });
         if(!cod && !algo) continue;
@@ -9514,7 +9533,8 @@ async function importarXLSXFile(file){
     alert('Importación completada: ' + res.creados + ' elemento(s) nuevo(s), ' + res.actualizados + ' actualizado(s) con ' + res.camposRellenados + ' campo(s) superpuesto(s)'
       + (res.omitidos ? ', ' + res.omitidos + ' fila(s) repetida(s) omitida(s)' : '') + '.'
       + (nLug || nVia ? '\n· ' + nLug + ' lugar(es) y ' + nVia + ' vía(s) del esquema.' : '')
-      + (fechasMal ? '\n· ' + fechasMal + ' fecha(s) no se entendieron y se guardaron tal cual: revísalas.' : ''));
+      + (fechasMal ? '\n· ' + fechasMal + ' fecha(s) no se entendieron y se guardaron tal cual: revísalas.' : '')
+      + (fechasViejas ? '\n· ' + fechasViejas + ' fecha(s) anteriores al 01/01/2000 no se importaron (el campo queda como estaba).' : ''));
     };
     if(!repes.length){ terminar(aplicar()); return; }
     importarRepetidosModal(repes, () => terminar(aplicar()));
